@@ -20,6 +20,8 @@ static int utf8_char_len(uint8_t c)
 
 void draw_center_text(const char* s, int y)
 {
+  extern lgfx::U8g2font g_font_cjk;
+  tft.setFont(&g_font_cjk);
   int16_t x = (COVER_SIZE - tft.textWidth(s)) / 2;
   if (x < 0) x = 0;
   tft.setCursor(x, y);

@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-extern const uint8_t u8g2_font_wenquanyi_merged[309762];
+extern const uint8_t u8g2_font_wenquanyi_merged[272475];
 
 #ifdef __cplusplus
 }

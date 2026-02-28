@@ -40,10 +40,10 @@ void boot_state_run(void)
     // ✅ 启动音频专用任务（双核：音频与UI分离，避免旋转推屏导致卡顿）
     audio_service_start();
 
-    nfc_init(); 
-    ui_enter_boot();
+    nfc_init();
 
-
+    // 让用户看到"启动中..."界面
+    delay(1000);
 
     // 3) 加载音乐索引文件，而不是自动扫描
     if (storage_is_ready()) {
@@ -51,13 +51,18 @@ void boot_state_run(void)
         if (load_success) {
             LOGI("[STORAGE] Loaded index file successfully");
         } else {
-            LOGE("[STORAGE] Failed to load index file. Please long-press the button to rescan.");
-            // 可选：如果加载失败，可以 fallback 扫描一次
-            // storage_scan_music_flat(g_tracks, g_albums, "/Music");
+            LOGE("[STORAGE] Failed to load index file. Performing fallback scan...");
+            // 加载失败时，fallback 扫描一次
+            bool scan_success = storage_rescan_flat();
+            if (scan_success) {
+                LOGI("[STORAGE] Fallback scan completed");
+            } else {
+                LOGE("[STORAGE] Fallback scan failed: no music files found");
+                ui_show_message("未找到音乐文件");
+                delay(2000);
+            }
         }
     }
-
-
 
     Serial.println("[BOOT] -> PLAYER");
     g_app_state = STATE_PLAYER;

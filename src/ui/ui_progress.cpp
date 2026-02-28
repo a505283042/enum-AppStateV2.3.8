@@ -13,6 +13,10 @@ extern volatile int     s_ui_track_idx;  // 0-based
 extern volatile int     s_ui_track_total;
 extern String s_np_album;
 
+// 播放模式切换高亮状态
+extern volatile uint32_t s_ui_mode_switch_time;
+#define MODE_SWITCH_HIGHLIGHT_MS 2000  // 模式切换高亮时间（毫秒）
+
 void draw_time_bar(LGFX_Sprite* dst,
                   int y_bar, int y_time,
                   uint32_t el_ms,
@@ -151,43 +155,48 @@ void draw_status_row(LGFX_Sprite* dst,
   
   // 计算右侧模式图标区域的宽度
   int mode_width = icon_size * 2 + margin * 2 - 7;  // 两个图标 + 边距 - 右移7像素
-  
+
+  // 检查是否处于模式切换高亮状态（2秒内）
+  uint32_t now = millis();
+  bool mode_highlight = (now - s_ui_mode_switch_time < MODE_SWITCH_HIGHLIGHT_MS);
+  uint16_t mode_color = mode_highlight ? UI_COLOR_VOLUME_ACTIVE : fg;
+
   // 根据播放模式显示对应的图标
   switch (s_ui_play_mode) {
     case PLAY_MODE_ALL_SEQ:
       // 全部顺序：TF卡图标 + 顺序图标
-      draw_tfcard_icon(dst, xR, y - icon_size / 2 + 8, fg);
-      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, fg);
+      draw_tfcard_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
+      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
       break;
-      
+
     case PLAY_MODE_ALL_RND:
       // 全部随机：TF卡图标 + 随机图标
-      draw_tfcard_icon(dst, xR, y - icon_size / 2 + 8, fg);
-      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, fg);
+      draw_tfcard_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
+      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
       break;
-      
+
     case PLAY_MODE_ARTIST_SEQ:
       // 歌手顺序：歌手图标 + 顺序图标
-      draw_artist_icon(dst, xR, y - icon_size / 2 + 8, fg);
-      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, fg);
+      draw_artist_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
+      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
       break;
-      
+
     case PLAY_MODE_ARTIST_RND:
       // 歌手随机：歌手图标 + 随机图标
-      draw_artist_icon(dst, xR, y - icon_size / 2 + 8, fg);
-      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, fg);
+      draw_artist_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
+      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
       break;
-      
+
     case PLAY_MODE_ALBUM_SEQ:
       // 专辑顺序：专辑图标 + 顺序图标
-      draw_album_icon(dst, xR, y - icon_size / 2 + 8, fg);
-      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, fg);
+      draw_album_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
+      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
       break;
-      
+
     case PLAY_MODE_ALBUM_RND:
       // 专辑随机：专辑图标 + 随机图标
-      draw_album_icon(dst, xR, y - icon_size / 2 + 8, fg);
-      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, fg);
+      draw_album_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
+      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
       break;
   }
 

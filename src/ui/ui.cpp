@@ -72,6 +72,10 @@ volatile int     s_ui_track_total = 0;
 static volatile uint32_t s_ui_volume_active_time = UINT32_MAX;  // 音量激活时间戳（初始化为最大值，确保启动时不显示激活状态）
 #define VOLUME_ACTIVE_TIMEOUT_MS 2000  // 音量激活超时时间（毫秒）
 
+// 播放模式切换高亮状态
+volatile uint32_t s_ui_mode_switch_time = 0;  // 模式切换时间戳
+#define MODE_SWITCH_HIGHLIGHT_MS 2000  // 模式切换高亮时间（毫秒）
+
 // --- 播放进度（由播放层喂给 UI）---
 static volatile uint32_t s_ui_play_ms  = 0;
 static volatile uint32_t s_ui_total_ms = 0;  // 0=未知
@@ -694,7 +698,7 @@ void ui_init(void)
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   draw_center_text("ESP32 Player", 90);
   tft.setTextSize(1);
-  draw_center_text("BOOT...", 130);
+  draw_center_text("启动中...", 130);
 
   s_screen = UI_SCREEN_BOOT;
   ui_unlock();
@@ -841,12 +845,10 @@ void ui_scan_begin()
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
   tft.setTextSize(2);
-  tft.setCursor(40, 60);
-  tft.print("SCANNING");
+  draw_center_text("正在扫描", 60);
 
   tft.setTextSize(1);
-  tft.setCursor(70, 100);
-  tft.print("Please wait");
+  draw_center_text("请稍候", 100);
 
   // 清除动画和计数区域
   tft.fillRect(0, 130, 240, 110, TFT_BLACK);
@@ -893,8 +895,7 @@ void ui_scan_tick(int tracks_count)
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.fillRect(0, 185, 240, 30, TFT_BLACK);
-  tft.setCursor(60, 190);
-  tft.printf("tracks = %d", tracks_count);
+  draw_center_text(String("已扫描 " + String(tracks_count) + " 首歌曲").c_str(), 190);
   ui_unlock();
 }
 
@@ -957,6 +958,7 @@ void ui_volume_key_pressed()
 void ui_set_play_mode(play_mode_t mode)
 {
   s_ui_play_mode = mode;
+  s_ui_mode_switch_time = millis();  // 记录模式切换时间，用于高亮显示
 }
 
 void ui_set_track_pos(int idx, int total)

@@ -530,7 +530,13 @@ bool storage_rescan_flat(const char* music_root, const char* index_path)
 {
   std::vector<TrackInfo> t;
   std::vector<AlbumInfo> a;
-  if (!storage_scan_music_flat(t, a, music_root)) return false;
+  if (!storage_scan_music_flat(t, a, music_root)) {
+    LOGE("[STORAGE] Scan failed: no music files found in %s", music_root);
+    // 扫描失败时，清空现有列表
+    s_tracks.clear();
+    return false;
+  }
+  LOGI("[STORAGE] Scan completed: %d tracks found", (int)t.size());
   return storage_save_index(index_path);
 }  // 重新扫描并保存索引
 
