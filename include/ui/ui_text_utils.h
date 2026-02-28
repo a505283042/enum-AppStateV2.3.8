@@ -66,3 +66,11 @@ void draw_album_with_icon(LGFX_Sprite* dst,
                           int text_size,
                           uint16_t fg,
                           int safe_pad);
+
+// 在精灵上绘制居中文本（带颜色参数）
+// 参数: dst - 目标精灵, s - 文本内容, y - Y坐标, fg - 前景色, safe_pad - 安全边距
+void draw_center_text_on_sprite(LGFX_Sprite* dst,
+                                const char* s,
+                                int y,
+                                uint16_t fg,
+                                int safe_pad);

@@ -100,7 +100,7 @@ void keys_init()
 void keys_update()
 {
   // MODE：短按=随机；长按=重扫
-  handle_key(k_mode,  player_toggle_random, start_rescan);
+  handle_key(k_mode,  [](){ ui_mode_switch_highlight(); player_toggle_random(); }, start_rescan);
 
   // PLAY：短按=播放/停止；长按=切换视图
   handle_key(k_play,  player_toggle_play, ui_toggle_view);

@@ -44,6 +44,10 @@ void ui_enter_nfc_admin(void);             /* 进入NFC管理界面 */
 
 bool ui_draw_cover_for_track(const TrackInfo& t, bool force_redraw = false);
 
+// 封面解码拆分（支持并行加载歌词）
+bool ui_cover_load_to_memory(const TrackInfo& t);  // 从 SD 读取封面到内存
+bool ui_cover_scale_from_memory();                  // 从内存解码缩放到精灵（不访问 SD）
+
 // Player UI相关功能已移除
 
 void ui_show_scanning();
@@ -61,6 +65,7 @@ void ui_set_album(const String& album);
 void ui_set_volume(uint8_t vol);
 void ui_volume_key_pressed();  // 音量按键按下通知
 void ui_set_play_mode(play_mode_t mode);  // 设置播放模式
+void ui_mode_switch_highlight();  // 模式切换高亮（按键触发）
 void ui_set_track_pos(int idx, int total);
 
 void ui_hold_render(bool hold);

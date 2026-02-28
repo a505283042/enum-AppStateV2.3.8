@@ -12,7 +12,7 @@ public:
       auto cfg = _bus.config();
       cfg.spi_host = SPI2_HOST;          // ESP32-S3 通常用 SPI2_HOST
       cfg.spi_mode = 0;
-      cfg.freq_write = 20000000;  // 降低频率测试稳定性
+      cfg.freq_write = 40000000;  // 40MHz SPI
       cfg.freq_read  = 20000000;
       cfg.pin_sclk = PIN_SPI_UI_SCK;
       cfg.pin_mosi = PIN_SPI_UI_MOSI;

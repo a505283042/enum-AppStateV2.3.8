@@ -49,101 +49,96 @@ void circle_span(int y, int pad, int& x0, int& w)
 
 void fmt_mmss(uint32_t ms, char out[6])
 {
-  uint32_t s = ms / 1000;
-  uint32_t m = s / 60;
-  s %= 60;
-  out[0] = '0' + (m / 10) % 10;
-  out[1] = '0' + (m % 10);
+  uint32_t total_sec = ms / 1000;
+  uint32_t min = total_sec / 60;
+  uint32_t sec = total_sec % 60;
+  if (min > 99) min = 99;
+  out[0] = '0' + (min / 10);
+  out[1] = '0' + (min % 10);
   out[2] = ':';
-  out[3] = '0' + (s / 10);
-  out[4] = '0' + (s % 10);
+  out[3] = '0' + (sec / 10);
+  out[4] = '0' + (sec % 10);
   out[5] = '\0';
+}
+
+// 按像素宽度截断文本（末尾加 ...）
+String clip_text_px(LGFX_Sprite* dst, const String& s, int max_w)
+{
+  if (!dst) return s;
+  int full_w = dst->textWidth(s.c_str());
+  if (full_w <= max_w) return s;
+
+  const char* p = s.c_str();
+  String out;
+  int out_w = 0;
+  int dots_w = dst->textWidth("...");
+  int avail = max_w - dots_w;
+  if (avail < 10) avail = 10;
+
+  while (*p) {
+    int clen = utf8_char_len((uint8_t)*p);
+    String ch(p);
+    ch.remove(clen);
+    int cw = dst->textWidth(ch.c_str());
+    if (out_w + cw > avail) break;
+    out += ch;
+    out_w += cw;
+    p += clen;
+  }
+  out += "...";
+  return out;
+}
+
+// UTF-8 像素级文本截断：按最大像素宽度截断，正确处理UTF-8字符（末尾加 ...）
+String clip_utf8_by_px(LGFX_Sprite* dst, const String& s, int max_w)
+{
+  if (!dst) return s;
+  
+  // 先检查完整文本宽度
+  int full_w = dst->textWidth(s.c_str());
+  if (full_w <= max_w) return s;
+
+  // 计算 ... 的宽度
+  int dots_w = dst->textWidth("...");
+  int avail = max_w - dots_w;
+  if (avail < 10) avail = 10;  // 最小可用宽度
+
+  String out;
+  int out_w = 0;
+  const char* p = s.c_str();
+  
+  while (*p) {
+    // 获取UTF-8字符长度
+    int clen = utf8_char_len((uint8_t)*p);
+    if (clen < 1) clen = 1;
+    
+    // 提取单个字符
+    String ch;
+    for (int i = 0; i < clen && *p; i++) {
+      ch += *p++;
+    }
+    
+    // 计算字符宽度
+    int cw = dst->textWidth(ch.c_str());
+    
+    // 如果加上这个字符会超出可用宽度，停止
+    if (out_w + cw > avail) {
+      break;
+    }
+    
+    out += ch;
+    out_w += cw;
+  }
+  
+  out += "...";
+  return out;
 }
 
 String clip_text(LGFX_Sprite* dst, const String& s, int max_w)
 {
-  if (dst->textWidth(s.c_str()) <= max_w) return s;
-  const String ell = "...";
-  int ell_w = dst->textWidth(ell.c_str());
-  if (ell_w >= max_w) return String("");
-
-  String t = s;
-  while (t.length() > 0 && dst->textWidth((t + ell).c_str()) > max_w) {
-    t.remove(t.length() - 1);
-  }
-  return t + ell;
+  return clip_text_px(dst, s, max_w);
 }
 
-String clip_text_px(LGFX_Sprite* dst, const String& s, int max_w)
-{
-  if (max_w <= 0) return "";
-  if (dst->textWidth(s.c_str()) <= max_w) return s;
-  const String ell = "...";
-  const int ell_w = dst->textWidth(ell.c_str());
-  if (ell_w >= max_w) return "";
-  String t = s;
-  while (t.length() > 0 && dst->textWidth((t + ell).c_str()) > max_w) {
-    t.remove(t.length() - 1);
-  }
-  return t + ell;
-}
-
-String clip_utf8_by_px(LGFX_Sprite* dst, const String& s, int max_w)
-{
-  if (max_w <= 0) return "";
-  if (dst->textWidth(s.c_str()) <= max_w) return s;
-
-  const String ell = "...";
-  if (dst->textWidth(ell.c_str()) >= max_w) return "";
-
-  const char* p = s.c_str();
-  String out;
-
-  for (int i = 0; p[i]; ) {
-    int len = utf8_char_len((uint8_t)p[i]);
-    out += String(p + i).substring(0, len);
-
-    if (dst->textWidth((out + ell).c_str()) > max_w) {
-      out.remove(out.length() - len);
-      break;
-    }
-    i += len;
-  }
-  return out + ell;
-}
-
-// 原来的居中描边文本绘制函数（已注释掉，改用带图标的版本）
-/*
-void draw_text_center_outline(LGFX_Sprite* dst,
-                           int y,
-                           const String& text,
-                           int text_size,
-                           uint16_t fg,
-                           int safe_pad)
-{
-  extern lgfx::U8g2font g_font_cjk;
-  
-  dst->setFont(&g_font_cjk);
-  dst->setTextSize(text_size);
-
-  int x0, w;
-  circle_span(y, safe_pad, x0, w);
-  if (w <= 10) return;
-
-  String t = clip_utf8_by_px(dst, text, w);
-  if (t.length() == 0) return;
-
-  int tw = dst->textWidth(t.c_str());
-  int x = x0 + (w - tw) / 2;
-
-  dst->setTextColor(fg);
-  dst->setCursor(x, y);
-  dst->print(t);
-}
-*/
-
-// 绘制带音符图标的居中文字（歌曲名）
-// 音符图标放在文字前面，整体居中
 void draw_title_with_note(LGFX_Sprite* dst,
                           int y,
                           const String& text,
@@ -163,35 +158,28 @@ void draw_title_with_note(LGFX_Sprite* dst,
 
   const int ICON_W = 14;
   const int ICON_H = 14;
-  const int ICON_GAP = 2; // 图标和文字之间的间距
+  const int ICON_GAP = 2;
 
-  // 计算可用宽度（减去图标和间距）
   int text_max_w = w - ICON_W - ICON_GAP;
   if (text_max_w < 20) return;
 
-  // 裁剪文字
   String t = clip_utf8_by_px(dst, text, text_max_w);
   if (t.length() == 0) return;
 
-  // 计算总宽度（图标 + 间距 + 文字）
   int tw = dst->textWidth(t.c_str());
   int total_w = ICON_W + ICON_GAP + tw;
 
-  // 计算起始位置（整体居中）
   int start_x = x0 + (w - total_w) / 2;
 
-  // 绘制音符图标（垂直居中）
-  int icon_y = y - ICON_H +16; // 调整图标垂直位置
+  int icon_y = y - ICON_H + 16;
   draw_note_icon_img(dst, start_x, icon_y, fg);
 
-  // 绘制文字
   int text_x = start_x + ICON_W + ICON_GAP;
   dst->setTextColor(fg);
   dst->setCursor(text_x, y);
   dst->print(t);
 }
 
-// 绘制带歌手图标的居中文字（歌手名）
 void draw_artist_with_icon(LGFX_Sprite* dst,
                            int y,
                            const String& text,
@@ -233,7 +221,6 @@ void draw_artist_with_icon(LGFX_Sprite* dst,
   dst->print(t);
 }
 
-// 绘制带专辑图标的居中文字（专辑名）
 void draw_album_with_icon(LGFX_Sprite* dst,
                           int y,
                           const String& text,
@@ -272,5 +259,39 @@ void draw_album_with_icon(LGFX_Sprite* dst,
   int text_x = start_x + ICON_W + ICON_GAP;
   dst->setTextColor(fg);
   dst->setCursor(text_x, y);
+  dst->print(t);
+}
+
+// 在精灵上绘制居中文本（带颜色参数）
+void draw_center_text_on_sprite(LGFX_Sprite* dst,
+                                const char* s,
+                                int y,
+                                uint16_t fg,
+                                int safe_pad)
+{
+  extern lgfx::U8g2font g_font_cjk;
+  
+  if (!dst || !s || s[0] == '\0') return;
+  
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  
+  // 计算圆屏安全区域
+  int x0, w;
+  circle_span(y, safe_pad, x0, w);
+  if (w <= 10) return;
+  
+  // 截断文本以适应宽度
+  String t = clip_utf8_by_px(dst, String(s), w);
+  if (t.length() == 0) return;
+  
+  // 计算居中位置
+  int tw = dst->textWidth(t.c_str());
+  int x = x0 + (w - tw) / 2;
+  if (x < x0) x = x0;
+  
+  // 绘制文本
+  dst->setTextColor(fg);
+  dst->setCursor(x, y);
   dst->print(t);
 }
