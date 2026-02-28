@@ -22,6 +22,91 @@ static bool s_user_paused = false;
 // ✅ 当前封面缓存属于哪一首；-1 表示未知/需要重解码
 static int  s_cover_idx = -1;
 
+// 当前播放的分组索引（歌手/专辑模式）
+static int s_current_group_idx = 0;
+static int s_current_track_in_group = 0;
+
+// 根据当前歌曲查找所属的歌手组索引
+static int find_current_artist_group(void)
+{
+  const auto& tracks_list = storage_get_tracks();
+  if (tracks_list.empty()) return 0;
+
+  auto groups = storage_get_artist_groups();
+  String current_artist = tracks_list[s_cur].artist.isEmpty() ? "未知歌手" : tracks_list[s_cur].artist;
+
+  // 如果有多个歌手，取第一个作为主歌手
+  int slash_pos = current_artist.indexOf('/');
+  if (slash_pos > 0) {
+    current_artist = current_artist.substring(0, slash_pos);
+    current_artist.trim();
+  }
+
+  for (size_t i = 0; i < groups.size(); i++) {
+    if (groups[i].name == current_artist) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+// 根据当前歌曲查找所属的专辑组索引
+static int find_current_album_group(void)
+{
+  const auto& tracks_list = storage_get_tracks();
+  if (tracks_list.empty()) return 0;
+
+  auto groups = storage_get_album_groups();
+  String current_artist = tracks_list[s_cur].artist.isEmpty() ? "未知歌手" : tracks_list[s_cur].artist;
+  String current_album = tracks_list[s_cur].album.isEmpty() ? "未知专辑" : tracks_list[s_cur].album;
+  String current_key = current_artist + " - " + current_album;
+
+  for (size_t i = 0; i < groups.size(); i++) {
+    if (groups[i].name == current_key) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+// 获取当前播放列表（根据播放模式）
+static std::vector<int> get_current_playlist(void)
+{
+  std::vector<int> playlist;
+  const auto& tracks_list = storage_get_tracks();
+
+  switch (g_play_mode) {
+    case PLAY_MODE_ALL_SEQ:
+    case PLAY_MODE_ALL_RND:
+      for (int i = 0; i < (int)tracks_list.size(); i++) {
+        playlist.push_back(i);
+      }
+      break;
+
+    case PLAY_MODE_ARTIST_SEQ:
+    case PLAY_MODE_ARTIST_RND: {
+      auto groups = storage_get_artist_groups();
+      if (s_current_group_idx >= (int)groups.size()) s_current_group_idx = 0;
+      if (!groups.empty()) {
+        playlist = groups[s_current_group_idx].track_indices;
+      }
+      break;
+    }
+
+    case PLAY_MODE_ALBUM_SEQ:
+    case PLAY_MODE_ALBUM_RND: {
+      auto groups = storage_get_album_groups();
+      if (s_current_group_idx >= (int)groups.size()) s_current_group_idx = 0;
+      if (!groups.empty()) {
+        playlist = groups[s_current_group_idx].track_indices;
+      }
+      break;
+    }
+  }
+
+  return playlist;
+}
+
 // 统一播放入口：切歌时会 stop->解封面->play；恢复播放时尽量复用封面
 static void player_play_idx(int idx, bool verbose, bool force_cover)
 {
@@ -71,7 +156,22 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     // ✅ 封面准备好后，再更新文字（这样文字不会先叠在旧封面上）
     ui_set_now_playing(t.title.c_str(), t.artist.c_str());
     ui_set_album(t.album);
-    ui_set_track_pos(s_cur, (int)tracks_list.size());
+    // 根据播放模式显示正确的歌曲索引和总数
+    int display_pos = s_cur;
+    int display_total = (int)tracks_list.size();
+    if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
+        g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+        std::vector<int> playlist = get_current_playlist();
+        display_total = (int)playlist.size();
+        // 查找当前歌曲在组内的位置（1-based）
+        for (int i = 0; i < (int)playlist.size(); i++) {
+            if (playlist[i] == s_cur) {
+                display_pos = i;  // 0-based 索引
+                break;
+            }
+        }
+    }
+    ui_set_track_pos(display_pos, display_total);
     ui_set_play_mode(g_play_mode);
     ui_set_volume(audio_get_volume());
 
@@ -152,24 +252,47 @@ void player_state_run(void)
 
 void player_next_track()
 {
-    const auto& tracks_list = storage_get_tracks();
-    if (tracks_list.empty()) return;
+  const auto& tracks_list = storage_get_tracks();
+  if (tracks_list.empty()) return;
 
-    int next;
-    if (g_random_play) {
-        if (s_random_table_size > 0) {
-            next = s_random_table[s_random_table_pos];
-            s_random_table_pos = (s_random_table_pos + 1) % s_random_table_size;
-        } else {
-            next = s_cur;
-        }
+  int next;
+  bool is_random = (g_play_mode == PLAY_MODE_ALL_RND || 
+                    g_play_mode == PLAY_MODE_ARTIST_RND || 
+                    g_play_mode == PLAY_MODE_ALBUM_RND);
+
+  if (is_random) {
+    if (s_random_table_size > 0) {
+      next = s_random_table[s_random_table_pos];
+      s_random_table_pos = (s_random_table_pos + 1) % s_random_table_size;
     } else {
-        next = s_cur + 1;
-        if (next >= (int)tracks_list.size()) next = 0;
+      next = s_cur;
+    }
+  } else {
+    std::vector<int> playlist = get_current_playlist();
+    if (playlist.empty()) return;
+
+    int current_pos = -1;
+    for (int i = 0; i < (int)playlist.size(); i++) {
+      if (playlist[i] == s_cur) {
+        current_pos = i;
+        break;
+      }
     }
 
-    LOGI("[PLAYER] NEXT -> #%d", next);
-    player_play_idx(next, false, true);
+    if (current_pos >= 0) {
+      current_pos++;
+      if (current_pos >= (int)playlist.size()) {
+        current_pos = 0;
+      }
+      next = playlist[current_pos];
+    } else {
+      next = s_cur + 1;
+      if (next >= (int)tracks_list.size()) next = 0;
+    }
+  }
+
+  LOGI("[PLAYER] NEXT -> #%d", next);
+  player_play_idx(next, false, true);
 }
 
 void player_prev_track()
@@ -191,8 +314,27 @@ void player_prev_track()
         }
     } else {
         // 顺序模式：使用当前索引的前一个
-        prev = s_cur - 1;
-        if (prev < 0) prev = (int)tracks_list.size() - 1;
+        std::vector<int> playlist = get_current_playlist();
+        if (playlist.empty()) return;
+
+        int current_pos = -1;
+        for (int i = 0; i < (int)playlist.size(); i++) {
+          if (playlist[i] == s_cur) {
+            current_pos = i;
+            break;
+          }
+        }
+
+        if (current_pos >= 0) {
+          current_pos--;
+          if (current_pos < 0) {
+            current_pos = (int)playlist.size() - 1;
+          }
+          prev = playlist[current_pos];
+        } else {
+          prev = s_cur - 1;
+          if (prev < 0) prev = (int)tracks_list.size() - 1;
+        }
     }
 
     LOGI("[PLAYER] PREV -> #%d", prev);
@@ -228,20 +370,73 @@ void player_volume_step(int delta)
     ui_set_volume((uint8_t)v);
 }
 
+// 长按 NEXT：切换到下一个歌手/专辑组
+void player_next_group()
+{
+    const auto& tracks_list = storage_get_tracks();
+    if (tracks_list.empty()) return;
+
+    if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND) {
+        auto groups = storage_get_artist_groups();
+        if (groups.empty()) return;
+
+        // 切换到下一个歌手组
+        s_current_group_idx = (s_current_group_idx + 1) % (int)groups.size();
+        String next_artist = groups[s_current_group_idx].name;
+
+        // 播放该组的第一个歌曲
+        if (!groups[s_current_group_idx].track_indices.empty()) {
+            int next_track = groups[s_current_group_idx].track_indices[0];
+            LOGI("[PLAYER] 切换到歌手组: %s (%d/%d)",
+                 next_artist.c_str(), s_current_group_idx + 1, (int)groups.size());
+            player_play_idx(next_track, false, true);
+        }
+    }
+    else if (g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+        auto groups = storage_get_album_groups();
+        if (groups.empty()) return;
+
+        // 切换到下一个专辑组
+        s_current_group_idx = (s_current_group_idx + 1) % (int)groups.size();
+        String next_album = groups[s_current_group_idx].name;
+
+        // 播放该组的第一个歌曲
+        if (!groups[s_current_group_idx].track_indices.empty()) {
+            int next_track = groups[s_current_group_idx].track_indices[0];
+            LOGI("[PLAYER] 切换到专辑组: %s (%d/%d)",
+                 next_album.c_str(), s_current_group_idx + 1, (int)groups.size());
+            player_play_idx(next_track, false, true);
+        }
+    }
+    else {
+        // 全部模式下，长按 NEXT 跳到最后一首
+        LOGI("[PLAYER] 跳到最后一首");
+        player_play_idx((int)tracks_list.size() - 1, false, true);
+    }
+}
+
 void player_toggle_random()
 {
     // 在6种播放模式之间循环切换
     g_play_mode = (play_mode_t)((g_play_mode + 1) % 6);
-    
+
+    // 切换到歌手/专辑模式时，根据当前歌曲设置组索引
+    if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND) {
+        s_current_group_idx = find_current_artist_group();
+    }
+    else if (g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+        s_current_group_idx = find_current_album_group();
+    }
+
     // 更新随机播放标志
-    bool is_random = (g_play_mode == PLAY_MODE_ALL_RND || 
-                      g_play_mode == PLAY_MODE_ARTIST_RND || 
+    bool is_random = (g_play_mode == PLAY_MODE_ALL_RND ||
+                      g_play_mode == PLAY_MODE_ARTIST_RND ||
                       g_play_mode == PLAY_MODE_ALBUM_RND);
-    
+
     if (is_random) {
-        const auto& tracks_list = storage_get_tracks();
-        if (!tracks_list.empty()) {
-            int total = (int)tracks_list.size();
+        std::vector<int> playlist = get_current_playlist();
+        if (!playlist.empty()) {
+            int total = (int)playlist.size();
             s_random_table_size = (total > RANDOM_TABLE_MAX) ? RANDOM_TABLE_MAX : total;
             s_random_table_pos = 0;
 
@@ -251,7 +446,7 @@ void player_toggle_random()
             }
 
             for (int i = 0; i < s_random_table_size; i++) {
-                s_random_table[i] = i;
+                s_random_table[i] = playlist[i];
             }
             for (int i = s_random_table_size - 1; i > 0; i--) {
                 int j = random(i + 1);
@@ -269,8 +464,33 @@ void player_toggle_random()
         s_random_table_size = 0;
         LOGI("[PLAYER] 随机播放: 关闭");
     }
-    
+
     // 同步更新UI
     g_random_play = is_random;
     ui_set_play_mode(g_play_mode);
+
+    // 切换到歌手/专辑模式时，立即更新列表数和索引显示
+    if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
+        g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
+        const auto& tracks_list = storage_get_tracks();
+        if (!tracks_list.empty()) {
+            std::vector<int> playlist = get_current_playlist();
+            int display_total = (int)playlist.size();
+            int display_pos = 0;
+            // 查找当前歌曲在组内的位置
+            for (int i = 0; i < (int)playlist.size(); i++) {
+                if (playlist[i] == s_cur) {
+                    display_pos = i;
+                    break;
+                }
+            }
+            ui_set_track_pos(display_pos, display_total);
+        }
+    } else {
+        // 全部模式：显示全局索引
+        const auto& tracks_list = storage_get_tracks();
+        if (!tracks_list.empty()) {
+            ui_set_track_pos(s_cur, (int)tracks_list.size());
+        }
+    }
 }

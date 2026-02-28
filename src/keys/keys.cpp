@@ -13,6 +13,7 @@ void player_prev_track();
 void player_toggle_random();
 void player_toggle_play();
 void player_volume_step(int delta); // 下面我会给你 player_state.cpp 里加
+void player_next_group(); // 长按 NEXT：切换到下一个歌手/专辑组
 
 static inline bool pressed(int level) { return level == LOW; } // 按下接地
 
@@ -104,9 +105,9 @@ void keys_update()
   // PLAY：短按=播放/停止；长按=切换视图
   handle_key(k_play,  player_toggle_play, ui_toggle_view);
 
-  // PREV / NEXT
+  // PREV / NEXT：短按=切歌，长按 NEXT=切换歌手/专辑组
   handle_key(k_prev,  player_prev_track, nullptr);
-  handle_key(k_next,  player_next_track, nullptr);
+  handle_key(k_next,  player_next_track, player_next_group);
 
   // VOL：按住连发
   handle_key(k_voldn, nullptr, nullptr, true, [](){ player_volume_step(-5); });

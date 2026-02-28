@@ -9,5 +9,6 @@ void player_toggle_random();  /* 切换随机播放模式 */
 void player_prev_track();
 void player_toggle_play();
 void player_volume_step(int delta);
+void player_next_group();     /* 长按 NEXT：切换到下一个歌手/专辑组 */
 
 #endif

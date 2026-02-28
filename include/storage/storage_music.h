@@ -37,6 +37,12 @@ struct AlbumInfo {
   String cover_path;   /* 专辑封面路径，如 /Music/A/B/cover.jpg (若不存在则空) */
 };
 
+/* 播放列表分组 - 表示一个歌手或专辑及其包含的歌曲索引 */
+struct PlaylistGroup {
+  String name;         /* 歌手名或专辑名 */
+  std::vector<int> track_indices;  /* 该分组包含的歌曲索引（指向s_tracks） */
+};
+
 /* 扫描音乐文件 - 扫描指定根目录下的音乐文件并填充音轨和专辑列表 */
 bool storage_scan_music(std::vector<TrackInfo>& out_tracks,
                         std::vector<AlbumInfo>& out_albums,
@@ -50,6 +56,10 @@ bool storage_scan_music_flat(std::vector<TrackInfo>& out_tracks,
                         
 const std::vector<TrackInfo>& storage_get_tracks(void);
 const std::vector<AlbumInfo>& storage_get_albums(void);
+
+/* 播放列表分组功能 */
+std::vector<PlaylistGroup> storage_get_artist_groups(void);  // 获取按歌手分组的播放列表
+std::vector<PlaylistGroup> storage_get_album_groups(void);   // 获取按专辑分组的播放列表
 
 // ====== Index 缓存（开机快启动） ======
 bool storage_load_index(const char* index_path = "/System/music_index.bin");

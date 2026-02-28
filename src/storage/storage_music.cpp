@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "utils/log.h"
 #include <vector>
+#include <map>
 #include "meta/meta_id3.h"
 #include "meta/meta_flac.h"
 #include "meta/meta_id3_cover.h"
@@ -19,8 +20,8 @@ using namespace std;
 static std::vector<TrackInfo> s_tracks;
 static std::vector<AlbumInfo> s_albums;
 
-const std::vector<TrackInfo>& storage_get_tracks(void) { return s_tracks; }
-const std::vector<AlbumInfo>& storage_get_albums(void) { return s_albums; }
+const std::vector<TrackInfo>& storage_get_tracks(void) { return s_tracks; }  // 获取歌曲列表
+const std::vector<AlbumInfo>& storage_get_albums(void) { return s_albums; }  // 获取专辑列表
 
 extern SdFat sd;
 
@@ -28,27 +29,27 @@ static bool ends_with_ignore_case(const String& s, const char* ext) {
   String a = s; a.toLowerCase();
   String b(ext); b.toLowerCase();
   return a.endsWith(b);
-} 
+}  // 忽略大小写检查文件后缀
 
 static String basename_no_ext(const String& filename) {
   int dot = filename.lastIndexOf('.');
   if (dot <= 0) return filename;
   return filename.substring(0, dot);
-}
+}  // 获取不含扩展名的文件名
 
 static bool file_exists(const String& path) {
   File32 f = sd.open(path.c_str(), O_RDONLY);
   bool ok = (bool)f;
   if (f) f.close();
   return ok;
-}
+}  // 检查文件是否存在
 
 static int find_album_index(std::vector<AlbumInfo>& albums, const String& artist, const String& album) {
   for (int i = 0; i < (int)albums.size(); ++i) {
     if (albums[i].artist == artist && albums[i].album == album) return i;
   }
   return -1;
-}
+}  // 查找专辑索引
 
 static void ensure_album(std::vector<AlbumInfo>& albums, const String& artist, const String& album, const String& music_root) {
   if (find_album_index(albums, artist, album) >= 0) return;
@@ -58,7 +59,7 @@ static void ensure_album(std::vector<AlbumInfo>& albums, const String& artist, c
   ai.folder = String(music_root);    // 单层目录时，专辑不再有 folder，先填根目录
   ai.cover_path = String();          // P2-1 先空
   albums.push_back(ai);
-}
+}  // 确保专辑存在，不存在则添加
 
 static String pick_cover_in_folder(const String& folder) {
   static const char* fixed[] = {
@@ -99,7 +100,7 @@ static String pick_cover_in_folder(const String& folder) {
 
   dir.close();
   return String();
-}
+}  // 在文件夹中查找封面图片
 
 static void scan_album_folder(const String& music_root,
                               const String& artist,
@@ -217,7 +218,7 @@ static void scan_album_folder(const String& music_root,
   }
 
   LOGI("[SCAN] Album scan complete: %d files, %d MP3s found", file_count, mp3_count);
-}
+}  // 扫描单个专辑文件夹
 
 bool storage_scan_music(std::vector<TrackInfo>& out_tracks,
                         std::vector<AlbumInfo>& out_albums,
@@ -280,7 +281,7 @@ bool storage_scan_music(std::vector<TrackInfo>& out_tracks,
   LOGI("[SCAN] Scan complete: %d artists, %d albums, %d tracks", 
                 artist_count, album_count, (int)out_tracks.size());
   return true;
-}
+}  // 按艺术家/专辑结构扫描音乐
 
 
 bool storage_scan_music_flat(std::vector<TrackInfo>& out_tracks,
@@ -399,12 +400,12 @@ bool storage_scan_music_flat(std::vector<TrackInfo>& out_tracks,
 
   LOGI("[SCAN] flat done: tracks=%d", (int)s_tracks.size());
   return true;
-}
+}  // 扁平扫描所有音乐文件（单层目录）
 
-static bool write_u16(File32& f, uint16_t v){ return f.write(&v, sizeof(v)) == sizeof(v); }
-static bool write_u32(File32& f, uint32_t v){ return f.write(&v, sizeof(v)) == sizeof(v); }
-static bool read_u16(File32& f, uint16_t& v){ return f.read(&v, sizeof(v)) == sizeof(v); }
-static bool read_u32(File32& f, uint32_t& v){ return f.read(&v, sizeof(v)) == sizeof(v); }
+static bool write_u16(File32& f, uint16_t v){ return f.write(&v, sizeof(v)) == sizeof(v); }  // 写入16位整数
+static bool write_u32(File32& f, uint32_t v){ return f.write(&v, sizeof(v)) == sizeof(v); }  // 写入32位整数
+static bool read_u16(File32& f, uint16_t& v){ return f.read(&v, sizeof(v)) == sizeof(v); }  // 读取16位整数
+static bool read_u32(File32& f, uint32_t& v){ return f.read(&v, sizeof(v)) == sizeof(v); }  // 读取32位整数
 
 static bool write_str(File32& f, const String& s)
 {
@@ -438,7 +439,7 @@ static bool read_str(File32& f, String& s)
     remain -= chunk;
   }
   return true;
-}
+}  // 读取字符串
 
 bool storage_save_index(const char* index_path)
 {
@@ -475,7 +476,7 @@ bool storage_save_index(const char* index_path)
   f.close();
   LOGI("[INDEX] saved: %s tracks=%d", index_path, (int)s_tracks.size());
   return true;
-}
+}  // 保存索引文件
 
 bool storage_load_index(const char* index_path)
 {
@@ -523,7 +524,7 @@ bool storage_load_index(const char* index_path)
 
   LOGI("[INDEX] loaded: %s tracks=%d", index_path, (int)s_tracks.size());
   return true;
-}
+}  // 加载索引文件
 
 bool storage_rescan_flat(const char* music_root, const char* index_path)
 {
@@ -531,4 +532,96 @@ bool storage_rescan_flat(const char* music_root, const char* index_path)
   std::vector<AlbumInfo> a;
   if (!storage_scan_music_flat(t, a, music_root)) return false;
   return storage_save_index(index_path);
+}  // 重新扫描并保存索引
+
+// 拆分多歌手字符串（如 "周杰伦/费玉清" -> ["周杰伦", "费玉清"]）
+static std::vector<String> split_artists(const String& artists_str) {
+  std::vector<String> result;
+  if (artists_str.isEmpty()) {
+    result.push_back("未知歌手");
+    return result;
+  }
+
+  int start = 0;
+  int end = artists_str.indexOf('/');
+
+  while (end != -1) {
+    String artist = artists_str.substring(start, end);
+    artist.trim();
+    if (artist.length() > 0) {
+      result.push_back(artist);
+    }
+    start = end + 1;
+    end = artists_str.indexOf('/', start);
+  }
+
+  // 添加最后一个歌手
+  String last = artists_str.substring(start);
+  last.trim();
+  if (last.length() > 0) {
+    result.push_back(last);
+  }
+
+  // 如果没有找到任何歌手，使用原字符串
+  if (result.empty()) {
+    result.push_back(artists_str);
+  }
+
+  return result;
 }
+
+std::vector<PlaylistGroup> storage_get_artist_groups(void)
+{
+  std::vector<PlaylistGroup> groups;
+  std::map<String, int> artist_map;
+
+  for (int i = 0; i < (int)s_tracks.size(); i++) {
+    // 拆分多歌手，将歌曲添加到每个歌手的组中
+    std::vector<String> artists = split_artists(s_tracks[i].artist);
+
+    for (const String& artist : artists) {
+      if (artist_map.find(artist) == artist_map.end()) {
+        PlaylistGroup group;
+        group.name = artist;
+        groups.push_back(group);
+        artist_map[artist] = (int)groups.size() - 1;
+      }
+
+      int group_idx = artist_map[artist];
+      groups[group_idx].track_indices.push_back(i);
+    }
+  }
+
+  LOGI("[PLAYLIST] Artist groups: %d", (int)groups.size());
+  return groups;
+}  // 获取按歌手分组的播放列表
+
+std::vector<PlaylistGroup> storage_get_album_groups(void)
+{
+  std::vector<PlaylistGroup> groups;
+  std::map<String, int> album_map;
+
+  for (int i = 0; i < (int)s_tracks.size(); i++) {
+    const String& album = s_tracks[i].album;
+    const String& artist = s_tracks[i].artist;
+    
+    // 歌手或专辑为空时使用默认值
+    String display_artist = artist.isEmpty() ? "未知歌手" : artist;
+    String display_album = album.isEmpty() ? "未知专辑" : album;
+    
+    String key = display_artist + " - " + display_album;
+    
+    if (album_map.find(key) == album_map.end()) {
+      PlaylistGroup group;
+      group.name = key;
+      groups.push_back(group);
+      album_map[key] = (int)groups.size() - 1;
+    }
+
+    int group_idx = album_map[key];
+    groups[group_idx].track_indices.push_back(i);
+  }
+
+  LOGI("[PLAYLIST] Album groups: %d", (int)groups.size());
+  return groups;
+}  // 获取按专辑分组的播放列表
