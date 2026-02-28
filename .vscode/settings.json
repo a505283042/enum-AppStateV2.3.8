@@ -1,0 +1,17 @@
+{
+    "files.associations": {
+        "array": "cpp",
+        "string_view": "cpp",
+        "initializer_list": "cpp",
+        "utility": "cpp",
+        "random": "c",
+        "string": "cpp",
+        "cstddef": "cpp",
+        "optional": "cpp",
+        "limits": "cpp",
+        "memory": "cpp",
+        "new": "cpp",
+        "functional": "cpp",
+        "type_traits": "cpp"
+    }
+}

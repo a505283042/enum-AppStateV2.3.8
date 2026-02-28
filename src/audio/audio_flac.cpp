@@ -1,0 +1,148 @@
+#include <Arduino.h>
+#include "audio/audio_flac.h"
+#include "audio/audio_i2s.h"
+#include "audio/audio_file.h"
+#include "board/board_pins.h"
+#include "utils/log.h"
+
+#define DR_FLAC_IMPLEMENTATION
+#include "../../lib/dr_libs/dr_flac.h"
+
+static AudioFile g_file;
+static drflac* g_flac = nullptr;
+static bool g_playing = false;
+static int g_sr = 44100;
+static uint32_t g_ch = 2;
+static size_t s_pending_off = 0;
+static size_t s_pending_frames = 0;
+
+static size_t on_read(void* user, void* bufferOut, size_t bytesToRead)
+{
+  AudioFile* af = (AudioFile*)user;
+  int n = af->read(bufferOut, bytesToRead);
+  if (n <= 0) return 0;
+  return (size_t)n;
+}
+
+static drflac_bool32 on_seek(void* user, int offset, drflac_seek_origin origin)
+{
+  AudioFile* af = (AudioFile*)user;
+  // offset 是 int（可为负），不能直接转成 uint32_t；否则会发生溢出，seek 飞出文件范围。
+  const int64_t cur  = (int64_t)af->tell();
+  const int64_t size = (int64_t)af->size();
+  int64_t base = 0;
+
+  switch (origin) {
+    case DRFLAC_SEEK_SET: base = 0;    break;
+    case DRFLAC_SEEK_CUR: base = cur;  break;
+    case DRFLAC_SEEK_END: base = size; break;
+    default: return DRFLAC_FALSE;
+  }
+
+  int64_t target = base + (int64_t)offset;
+  if (target < 0) target = 0;
+  if (target > size) target = size;
+
+  return af->seek((uint32_t)target) ? DRFLAC_TRUE : DRFLAC_FALSE;
+}
+
+static drflac_bool32 on_tell(void* user, drflac_int64* pCursor)
+{
+  AudioFile* af = (AudioFile*)user;
+  *pCursor = (drflac_int64)af->tell();
+  return DRFLAC_TRUE;
+}
+
+bool audio_flac_start(SdFat& sd, const char* path)
+{
+  audio_flac_stop();
+  if (!g_file.open(sd, path)) {
+    LOGE("[FLAC] open failed: %s", path);
+    return false;
+  }
+
+  g_flac = drflac_open(on_read, on_seek, on_tell, &g_file, nullptr);
+  if (!g_flac) {
+    LOGE("[FLAC] drflac_open failed");
+    g_file.close();
+    return false;
+  }
+
+  g_sr = (int)g_flac->sampleRate;
+  g_ch = g_flac->channels;
+  g_playing = true;
+  return true;
+}
+
+void audio_flac_stop()
+{
+  // ✅ 清 pending PCM（非常重要）
+  s_pending_off = 0;
+  s_pending_frames = 0;
+
+  if (g_flac) { drflac_close(g_flac); g_flac = nullptr; }
+  if (g_file.f) g_file.close();
+  g_playing = false;
+}
+
+int audio_flac_sample_rate() { return g_sr; }
+
+bool audio_flac_loop()
+{
+  if (!g_playing || !g_flac) return false;
+
+  constexpr uint32_t PCM_FRAMES = 1024;
+  static int16_t pcm[PCM_FRAMES * 2]; // stereo buffer
+
+  // A) 先写完 pending
+  if (s_pending_frames > 0) {
+    size_t w = audio_i2s_write_frames(pcm + s_pending_off * 2, s_pending_frames);
+    if (w == SIZE_MAX) { audio_flac_stop(); return false; }
+    s_pending_off += w;
+    s_pending_frames -= w;
+    return true;
+  }
+
+  // B) 读新 PCM（按 channels 读）
+  const uint32_t ch = g_ch; // 确保 g_ch 来自 g_flac->channels
+  uint32_t frames_read = 0;
+
+  if (ch == 2) {
+    frames_read = drflac_read_pcm_frames_s16(g_flac, PCM_FRAMES, pcm);
+  } else if (ch == 1) {
+    // 先读到 pcm 的前半（mono），再从后往前扩成 stereo
+    frames_read = drflac_read_pcm_frames_s16(g_flac, PCM_FRAMES, pcm);
+    if (frames_read > 0) {
+      for (int i = (int)frames_read - 1; i >= 0; --i) {
+        int16_t v = pcm[i];
+        pcm[i * 2 + 0] = v;
+        pcm[i * 2 + 1] = v;
+      }
+    }
+  } else {
+    // 不支持的声道数：直接停
+    audio_flac_stop();
+    return false;
+  }
+
+  if (frames_read == 0) { audio_flac_stop(); return false; }
+
+  // C) 设置采样率（不要重 init）
+  static int last_sr = 0;
+  if (g_sr != last_sr) {
+    audio_i2s_set_sample_rate(g_sr);
+    last_sr = g_sr;
+  }
+
+  // D) 建 pending 并尝试写
+  s_pending_off = 0;
+  s_pending_frames = frames_read;
+
+  size_t w = audio_i2s_write_frames(pcm, s_pending_frames);
+  if (w == SIZE_MAX) { audio_flac_stop(); return false; }
+  s_pending_off += w;
+  s_pending_frames -= w;
+
+  return true;
+}
+
