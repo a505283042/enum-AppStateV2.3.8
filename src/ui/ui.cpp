@@ -882,6 +882,8 @@ bool ui_cover_scale_from_memory()
   s_coverSprReady = ok;
   if (ok) {
     s_src = &s_coverSpr;  // 设置旋转源精灵
+    s_angle_deg = 0.0f;  // 重置旋转角度
+    s_rot_last_ms = 0;   // 重置旋转时间戳
   }
   ui_unlock();
 
