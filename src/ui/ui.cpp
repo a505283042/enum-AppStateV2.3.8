@@ -99,7 +99,8 @@ volatile uint32_t s_ui_mode_switch_time = 0;  // 模式切换时间戳
 static volatile uint32_t s_ui_play_ms  = 0;
 static volatile uint32_t s_ui_total_ms = 0;  // 0=未知
 
-static LGFX_Sprite s_coverSpr(&tft);
+static LGFX_Sprite s_coverSpr(&tft);      // 原始封面（无遮罩）→ 供 ROTATE 旋转
+static LGFX_Sprite s_coverMasked(&tft);   // 带遮罩封面 → 供 INFO 显示
 static bool s_coverSprInited = false;
 static bool s_coverSprReady  = false;
 
@@ -110,7 +111,15 @@ static uint8_t s_front = 0;
 static uint8_t s_back  = 1;
 static bool s_framesInited = false;
 
-static LGFX_Sprite* s_src = nullptr;
+// 旋转视图双缓冲帧
+static LGFX_Sprite s_rotFrame0(&tft);
+static LGFX_Sprite s_rotFrame1(&tft);
+static LGFX_Sprite* s_rotFrame[2] = { &s_rotFrame0, &s_rotFrame1 };
+static uint8_t s_rotFront = 0;
+static uint8_t s_rotBack  = 1;
+static bool s_rotFramesInited = false;
+
+static LGFX_Sprite* s_src = nullptr;  // 指向 s_coverSpr，用于旋转
 
 static float s_angle_deg = 0.0f;
 static uint32_t s_rot_last_ms = 0;
@@ -298,22 +307,29 @@ static bool cover_blit_scaled_to_240(const uint8_t* ptr, size_t len, bool is_png
   bool got = is_png ? png_get_wh(ptr, len, srcW, srcH) : jpg_get_wh(ptr, len, srcW, srcH);
   if (!got || srcW <= 0 || srcH <= 0) {
     // 拿不到尺寸就退回"裁剪模式"（直接绘制到 240x240）
-    bool ok = false;
     s_coverSpr.fillScreen(TFT_BLACK);
+    bool ok = false;
     if (is_png) ok = s_coverSpr.drawPng(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
     else        ok = s_coverSpr.drawJpg(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
-    if (ok) s_coverSpr.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
-    return ok;
+    if (!ok) return false;
+    // 复制到遮罩精灵并添加遮罩
+    s_coverMasked.fillScreen(TFT_BLACK);
+    s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
+    s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
+    return true;
   }
 
   // 安全阈值：防止超大封面炸内存
   if (srcW > 800 || srcH > 800) {
-    // 太大就不要创建超大 tmp，直接走原来的裁剪绘制
     s_coverSpr.fillScreen(TFT_BLACK);
     bool ok = is_png ? s_coverSpr.drawPng(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE)
                      : s_coverSpr.drawJpg(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
-    if (ok) s_coverSpr.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
-    return ok;
+    if (!ok) return false;
+    // 复制到遮罩精灵并添加遮罩
+    s_coverMasked.fillScreen(TFT_BLACK);
+    s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
+    s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
+    return true;
   }
 
   // 1) 创建临时 sprite：解码原图（800x800 约 1.9MB，PSRAM 足够）
@@ -335,11 +351,10 @@ static bool cover_blit_scaled_to_240(const uint8_t* ptr, size_t len, bool is_png
     return ok;
   }
 
-  tmp.fillScreen(TFT_BLACK);;
+  tmp.fillScreen(TFT_BLACK);
 
-  // 解码原图到临时 sprite
   bool ok = false;
-  if (is_png) ok = tmp.drawPng(ptr, len, 0, 0);   // 注意：这里不要给 240x240，否则又会裁剪
+  if (is_png) ok = tmp.drawPng(ptr, len, 0, 0);
   else        ok = tmp.drawJpg(ptr, len, 0, 0);
 
   if (!ok) {
@@ -347,16 +362,14 @@ static bool cover_blit_scaled_to_240(const uint8_t* ptr, size_t len, bool is_png
     return false;
   }
 
-  // 将缩放后的图像绘制到封面精灵中
   s_coverSpr.fillScreen(TFT_BLACK);
-  cover_downscale_bilinear(tmp, s_coverSpr, COVER_SIZE, true); // true=居中裁切填满
+  cover_downscale_bilinear(tmp, s_coverSpr, COVER_SIZE, true);
 
-  // 释放临时 sprite
+  s_coverMasked.fillScreen(TFT_BLACK);
+  s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
+  s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
+
   tmp.deleteSprite();
-  
-  // 添加半透明遮罩（只执行一次，后续每帧直接使用）
-  s_coverSpr.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
-  
   return true;
 }
 
@@ -380,7 +393,7 @@ static void cover_draw_placeholder(const char* msg)
 }
 
 // 初始化封面精灵（仅执行一次）
-// 功能: 创建 240x240 的封面精灵，用于存储解码后的封面图像
+// 功能: 创建 s_coverSpr（原始）和 s_coverMasked（带遮罩）两个精灵
 //      如果检测到 PSRAM，则使用 PSRAM 以节省内部 RAM
 static void cover_sprite_init_once()
 {
@@ -389,36 +402,53 @@ static void cover_sprite_init_once()
 
   // 检测 PSRAM 并配置精灵
   const bool has_psram = psramFound();
+
+  // 原始封面精灵（供 ROTATE 视图旋转）
   s_coverSpr.setColorDepth(16);
   s_coverSpr.setPsram(has_psram);
-  // 创建 240x240 的精灵
   s_coverSpr.createSprite(COVER_SIZE, COVER_SIZE);
   s_coverSpr.fillScreen(TFT_BLACK);
+
+  // 带遮罩封面精灵（供 INFO 视图显示）
+  s_coverMasked.setColorDepth(16);
+  s_coverMasked.setPsram(has_psram);
+  s_coverMasked.createSprite(COVER_SIZE, COVER_SIZE);
+  s_coverMasked.fillScreen(TFT_BLACK);
+
   s_coverSprInited = true;
 }
 
 // 初始化双缓冲帧精灵（仅执行一次）
-// 功能: 创建两个 240x240 的精灵用于双缓冲，实现无闪烁的旋转封面动画
+// 功能: 创建 INFO 视图和 ROTATE 视图的双缓冲帧
 //      如果检测到 PSRAM，则使用 PSRAM 以节省内部 RAM
 static void cover_frames_init_once()
 {
   // 如果已经初始化过，直接返回
   if (s_framesInited) return;
 
-  // 检测 PSRAM 并配置两个帧精灵
   const bool has_psram = psramFound();
+
+  // INFO 视图双缓冲帧
   for (int i = 0; i < 2; ++i) {
     s_frame[i]->setColorDepth(16);
     s_frame[i]->setPsram(has_psram);
-    // 创建 240x240 的精灵
     s_frame[i]->createSprite(COVER_SIZE, COVER_SIZE);
     s_frame[i]->fillScreen(TFT_BLACK);
   }
-
-  // 初始化前后帧索引
   s_front = 0;
   s_back  = 1;
   s_framesInited = true;
+
+  // ROTATE 视图双缓冲帧
+  for (int i = 0; i < 2; ++i) {
+    s_rotFrame[i]->setColorDepth(16);
+    s_rotFrame[i]->setPsram(has_psram);
+    s_rotFrame[i]->createSprite(COVER_SIZE, COVER_SIZE);
+    s_rotFrame[i]->fillScreen(TFT_BLACK);
+  }
+  s_rotFront = 0;
+  s_rotBack  = 1;
+  s_rotFramesInited = true;
 }
 
 // 设置封面旋转动画的源精灵
@@ -435,11 +465,11 @@ static void cover_set_source(LGFX_Sprite* src)
 //      使用双缓冲技术避免闪烁，交换前后帧索引
 static void cover_rotate_draw(float angle_deg)
 {
-  // 检查帧是否已初始化以及源精灵是否有效
-  if (!s_framesInited || !s_src) return;
+  // 检查旋转帧是否已初始化以及源精灵是否有效
+  if (!s_rotFramesInited || !s_src) return;
 
-  // 获取后帧指针
-  auto* dst = s_frame[s_back];
+  // 获取后帧指针（旋转专用双缓冲）
+  auto* dst = s_rotFrame[s_rotBack];
   // 清空后帧
   dst->fillScreen(TFT_BLACK);
   // 将源精灵旋转指定角度并绘制到后帧（不缩放）
@@ -449,25 +479,25 @@ static void cover_rotate_draw(float angle_deg)
   dst->pushSprite(0, 0);
 
   // 交换前后帧索引（双缓冲）
-  uint8_t tmp = s_front;
-  s_front = s_back;
-  s_back = tmp;
+  uint8_t tmp = s_rotFront;
+  s_rotFront = s_rotBack;
+  s_rotBack = tmp;
 }
 
 static void cover_info_draw()
 {
   if (!s_framesInited) return;
 
-  uint32_t t0 = millis();  // 性能测量开始
+  uint32_t t0 = millis();
 
   auto* dst = s_frame[s_back];
   dst->fillScreen(TFT_BLACK);
 
   uint32_t t1 = millis();
 
-  // 1) 静态封面（整屏）- 直接绘制，移除半透明遮罩以提升性能
+  // 1) 静态封面（整屏）- 使用带遮罩的版本
   if (s_coverSprReady) {
-    s_coverSpr.pushSprite(dst, 0, 0);
+    s_coverMasked.pushSprite(dst, 0, 0);
   }
   uint32_t t_cover = millis();
 
@@ -850,6 +880,9 @@ bool ui_cover_scale_from_memory()
   ui_lock();
   bool ok = cover_blit_scaled_to_240(s_cover_mem_ptr, s_cover_mem_len, s_cover_mem_is_png);
   s_coverSprReady = ok;
+  if (ok) {
+    s_src = &s_coverSpr;  // 设置旋转源精灵
+  }
   ui_unlock();
 
   s_cover_mem_ptr = nullptr;
