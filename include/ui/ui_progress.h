@@ -22,3 +22,6 @@ void draw_status_row(LGFX_Sprite* dst,
                     int safe_pad,
                     uint16_t fg,
                     bool volume_active);
+
+// 重置专辑名滚动偏移（切歌时调用）
+void reset_album_scroll();

@@ -13,6 +13,12 @@ extern volatile int     s_ui_track_idx;  // 0-based
 extern volatile int     s_ui_track_total;
 extern String s_np_album;
 
+// 专辑名滚动状态（像素偏移）
+static int s_album_scroll_x = 0;
+static uint32_t s_album_scroll_last_ms = 0;
+static constexpr int ALBUM_SCROLL_SPEED = 1;    // 滚动速度（像素/帧）
+static constexpr int ALBUM_SCROLL_GAP = 20;     // 副本间距（像素）
+
 // 播放模式切换高亮状态
 extern volatile uint32_t s_ui_mode_switch_time;
 #define MODE_SWITCH_HIGHLIGHT_MS 2000  // 模式切换高亮时间（毫秒）
@@ -139,19 +145,19 @@ void draw_status_row(LGFX_Sprite* dst,
   // 左侧：音量图标 + 百分比
   int xL = x0 + margin;
   uint16_t volume_color = volume_active ? UI_COLOR_VOLUME_ACTIVE : fg;
-  draw_volume_icon(dst, xL, y - 5 + 10, volume_color);  // 11像素高，下移8像素
+  draw_volume_icon(dst, xL, y + 3, volume_color);  // 上移2像素
   
   char vol_str[8];
   snprintf(vol_str, sizeof(vol_str), "%u%%", (unsigned)s_ui_volume);
   dst->setTextColor(volume_color);
-  dst->setCursor(xL + 11 + 4, y + 2);  // 音量图标宽度为11像素，文本下移2像素
+  dst->setCursor(xL + 11 + 4, y);  // 上移2像素
   dst->print(vol_str);
   
   // 计算左侧音量区域的宽度
   int vol_width = 11 + 4 + dst->textWidth(vol_str);  // 图标 + 间距 + 文本
 
   // 右侧：播放模式图标（根据播放模式显示不同的图标组合）
-  int xR = x0 + w - icon_size * 2 - margin * 2 + 7;  // 往右移7像素
+  int xR = x0 + w - icon_size * 2 - margin * 2 + 7;  // 右边图标位置不变
   
   // 计算右侧模式图标区域的宽度
   int mode_width = icon_size * 2 + margin * 2 - 7;  // 两个图标 + 边距 - 右移7像素
@@ -162,41 +168,45 @@ void draw_status_row(LGFX_Sprite* dst,
   uint16_t mode_color = mode_highlight ? UI_COLOR_VOLUME_ACTIVE : fg;
 
   // 根据播放模式显示对应的图标
+  // 左边图标往右移3像素，右边图标位置不变
+  int xL_icon = xR + 3;  // 左边图标位置
+  int xR_icon = xR + icon_size + 4;  // 右边图标位置不变
+  
   switch (s_ui_play_mode) {
     case PLAY_MODE_ALL_SEQ:
       // 全部顺序：TF卡图标 + 顺序图标
-      draw_tfcard_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
-      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
+      draw_tfcard_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
+      draw_repeat_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
       break;
 
     case PLAY_MODE_ALL_RND:
       // 全部随机：TF卡图标 + 随机图标
-      draw_tfcard_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
-      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
+      draw_tfcard_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
+      draw_random_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
       break;
 
     case PLAY_MODE_ARTIST_SEQ:
       // 歌手顺序：歌手图标 + 顺序图标
-      draw_artist_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
-      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
+      draw_artist_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
+      draw_repeat_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
       break;
 
     case PLAY_MODE_ARTIST_RND:
       // 歌手随机：歌手图标 + 随机图标
-      draw_artist_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
-      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
+      draw_artist_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
+      draw_random_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
       break;
 
     case PLAY_MODE_ALBUM_SEQ:
       // 专辑顺序：专辑图标 + 顺序图标
-      draw_album_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
-      draw_repeat_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
+      draw_album_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
+      draw_repeat_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
       break;
 
     case PLAY_MODE_ALBUM_RND:
       // 专辑随机：专辑图标 + 随机图标
-      draw_album_icon(dst, xR, y - icon_size / 2 + 8, mode_color);
-      draw_random_icon(dst, xR + icon_size + 4, y - icon_size / 2 + 8, mode_color);
+      draw_album_icon(dst, xL_icon, y - icon_size / 2 + 8, mode_color);
+      draw_random_icon(dst, xR_icon, y - icon_size / 2 + 8, mode_color);
       break;
   }
 
@@ -225,7 +235,8 @@ void draw_status_row(LGFX_Sprite* dst,
   if (midS.length() == 0) midS = "未知专辑";
 
   // 计算中间可用空间（音量区域结束位置到模式图标开始位置）
-  int available_width = w - vol_width - mode_width - margin;
+  // 左边模式图标往右移3像素，专辑名可用宽度减少3像素
+  int available_width = w - vol_width - mode_width - margin - 3;
 
   const int ALBUM_ICON_W = 14;
   const int ALBUM_ICON_GAP = 2;
@@ -233,23 +244,69 @@ void draw_status_row(LGFX_Sprite* dst,
   // 计算专辑名文本最大可用宽度（减去图标和间距）
   int max_text_width = available_width - ALBUM_ICON_W - ALBUM_ICON_GAP;
 
-  // 使用 clip_utf8_by_px 进行裁断（参考之前的策略）
-  midS = clip_utf8_by_px(dst, midS, max_text_width);
-
-  // 计算实际宽度
+  // 计算专辑名实际宽度
+  dst->setTextWrap(false);  // 禁止自动换行
   int twM = dst->textWidth(midS.c_str());
-  int total_width = ALBUM_ICON_W + ALBUM_ICON_GAP + twM;
+  bool need_scroll = (twM > max_text_width);
 
-  // 居中显示（图标+文字整体居中）
-  int start_x = xL + vol_width + (available_width - total_width) / 2;
+  // 居中显示位置（图标+文字整体居中）
+  int start_x = xL + vol_width;
 
-  // 绘制专辑图标
-  int icon_y = y - ALBUM_ICON_W + 15; // 调整垂直位置
-  draw_album_icon_img(dst, start_x, icon_y, UI_COLOR_ALBUM);
+  // 文本起始位置（图标右侧）
+  int text_start_x = start_x + ALBUM_ICON_W + ALBUM_ICON_GAP;
 
-  // 绘制专辑名
-  int text_x = start_x + ALBUM_ICON_W + ALBUM_ICON_GAP;
-  dst->setTextColor(UI_COLOR_ALBUM);  // 专辑名颜色（中灰）
-  dst->setCursor(text_x, y);
-  dst->print(midS.c_str());
+  if (!need_scroll) {
+    // 不需要滚动：图标+文本整体居中
+    int total_width = ALBUM_ICON_W + ALBUM_ICON_GAP + twM;
+    int offset_x = (available_width - total_width) / 2;
+    
+    // 绘制专辑图标（居中位置）
+    int icon_y = y - ALBUM_ICON_W + 15;
+    draw_album_icon_img(dst, start_x + offset_x, icon_y, UI_COLOR_ALBUM);
+    
+    // 绘制文本（居中位置）
+    dst->setTextColor(UI_COLOR_ALBUM);
+    dst->setCursor(text_start_x + offset_x, y);
+    dst->print(midS.c_str());
+  } else {
+    // 需要滚动：图标固定在左边，文本滚动
+    int icon_y = y - ALBUM_ICON_W + 15;
+    draw_album_icon_img(dst, start_x, icon_y, UI_COLOR_ALBUM);
+    
+    // 更新滚动偏移（像素）
+    uint32_t now = millis();
+    if (now - s_album_scroll_last_ms > 30) {  // 每30ms滚动1像素
+      s_album_scroll_last_ms = now;
+      s_album_scroll_x += ALBUM_SCROLL_SPEED;
+      // 滚动范围：文本宽度 + 间距
+      if (s_album_scroll_x > twM + ALBUM_SCROLL_GAP) {
+        s_album_scroll_x = 0;
+      }
+    }
+
+    dst->setTextColor(UI_COLOR_ALBUM);
+
+    // 主文本位置（像素滚动）
+    int x1 = text_start_x - s_album_scroll_x;
+
+    // 设置裁剪区域
+    dst->setClipRect(text_start_x, 0, max_text_width, dst->height());
+
+    // 绘制主文本
+    dst->setCursor(x1, y);
+    dst->print(midS.c_str());
+
+    // 绘制副本文本
+    int x2 = x1 + twM + ALBUM_SCROLL_GAP;
+    dst->setCursor(x2, y);
+    dst->print(midS.c_str());
+
+    // 清除裁剪区域
+    dst->clearClipRect();
+  }
+}
+
+void reset_album_scroll() {
+  s_album_scroll_x = 0;
+  s_album_scroll_last_ms = 0;
 }

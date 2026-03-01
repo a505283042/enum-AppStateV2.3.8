@@ -74,3 +74,28 @@ void draw_center_text_on_sprite(LGFX_Sprite* dst,
                                 int y,
                                 uint16_t fg,
                                 int safe_pad);
+
+// 滚动文本绘制（支持副本滚动）
+// 参数: dst - 目标精灵, y - Y坐标, text - 文本内容, scroll_x - 滚动偏移（会被更新）
+//       max_w - 最大显示宽度, fg - 前景色, gap - 副本间距
+// 返回: 文本是否超出显示区域（需要滚动）
+bool draw_scrolling_text(LGFX_Sprite* dst,
+                         int y,
+                         const String& text,
+                         int& scroll_x,
+                         int max_w,
+                         uint16_t fg,
+                         int gap = 40);
+
+// 绘制带图标的滚动文本
+// 参数: dst - 目标精灵, y - Y坐标, text - 文本内容, scroll_x - 滚动偏移
+//       icon_w - 图标宽度, fg - 前景色, safe_pad - 安全边距, draw_icon - 图标绘制回调
+// 返回: 文本是否超出显示区域
+bool draw_scrolling_text_with_icon(LGFX_Sprite* dst,
+                                   int y,
+                                   const String& text,
+                                   int& scroll_x,
+                                   int icon_w,
+                                   uint16_t fg,
+                                   int safe_pad,
+                                   void (*draw_icon)(LGFX_Sprite*, int, int, uint16_t));

@@ -29,6 +29,16 @@
 
 lgfx::U8g2font g_font_cjk(u8g2_font_wenquanyi_merged);
 
+// UTF-8 字符长度计算
+static int utf8_char_len(uint8_t c)
+{
+  if ((c & 0x80) == 0) return 1;
+  if ((c & 0xE0) == 0xC0) return 2;
+  if ((c & 0xF0) == 0xE0) return 3;
+  if ((c & 0xF8) == 0xF0) return 4;
+  return 1;
+}
+
 static TaskHandle_t s_ui_task = nullptr;
 static SemaphoreHandle_t s_ui_mtx = nullptr;
 
@@ -62,6 +72,14 @@ static volatile enum ui_player_view_t s_view = UI_VIEW_INFO;
 static String s_np_title;
 static String s_np_artist;
 String s_np_album;
+
+// ===== 滚动文本状态（像素偏移）=====
+static int s_title_scroll_x = 0;      // 标题滚动像素偏移
+static int s_artist_scroll_x = 0;     // 歌手滚动像素偏移
+static int s_album_scroll_x = 0;      // 专辑滚动像素偏移
+static uint32_t s_scroll_last_ms = 0; // 上次滚动时间
+static constexpr int SCROLL_SPEED = 1;    // 滚动速度（像素/帧）
+static constexpr int SCROLL_GAP = 20;     // 滚动副本间距（像素）
 
 // ===== status row (above progress bar) =====
 volatile uint8_t s_ui_volume = 100;   // 0~100
@@ -350,7 +368,7 @@ static void cover_draw_placeholder(const char* msg)
 {
   cover_sprite_init_once();
   s_coverSpr.fillScreen(TFT_BLACK);
-  s_coverSpr.drawRect(0, 0, COVER_SIZE, COVER_SIZE, TFT_DARKGREY);
+  s_coverSpr.drawRect(0, 0, COVER_SIZE, COVER_SIZE, 0x7BEF);  // 亮灰边框
 
   s_coverSpr.setTextSize(2);
   s_coverSpr.setTextColor(TFT_WHITE);
@@ -460,7 +478,7 @@ static void cover_info_draw()
   const uint16_t c_title  = UI_COLOR_TITLE;   // 歌名文字颜色（纯白）
   const uint16_t c_artist = UI_COLOR_ARTIST;  // 歌手文字颜色（浅灰）
   const uint16_t c_lyrics = 0xFFFF;           // 歌词颜色（白色）
-  const uint16_t c_lyrics_next = 0x8410;      // 下一句歌词颜色（灰色）
+  const uint16_t c_lyrics_next = 0xAD55;      // 下一句歌词颜色（亮灰）
 
   // 3) 把信息区抬高一点，避免圆屏底部变窄导致左右被裁
 
@@ -561,9 +579,52 @@ static void cover_info_draw()
 
   uint32_t t_status = millis();
 
-  // 5) 标题（带音符图标）/歌手（带歌手图标）+ 描边外扩
-  draw_title_with_note(dst, y_title, s_np_title, 1, c_title, safe_pad);
-  draw_artist_with_icon(dst, y_artist, s_np_artist, 1, c_artist, safe_pad);
+  // 5) 标题/歌手（支持滚动显示长文本）
+  extern void draw_note_icon_img(LGFX_Sprite* dst, int x, int y, uint16_t color);
+  extern void draw_artist_icon_img(LGFX_Sprite* dst, int x, int y, uint16_t color);
+  
+  // 更新滚动偏移（像素滚动，30ms间隔）
+  uint32_t now = millis();
+  if (now - s_scroll_last_ms > 30) {
+    s_scroll_last_ms = now;
+    
+    // 标题滚动
+    bool title_scroll = draw_scrolling_text_with_icon(dst, y_title, s_np_title, s_title_scroll_x, 
+                                                       14, c_title, safe_pad, draw_note_icon_img);
+    if (title_scroll) {
+      s_title_scroll_x += SCROLL_SPEED;
+      // 滚动范围：文本宽度 + 间距
+      extern lgfx::U8g2font g_font_cjk;
+      dst->setFont(&g_font_cjk);
+      int title_w = dst->textWidth(s_np_title.c_str());
+      if (s_title_scroll_x > title_w + SCROLL_GAP) {
+        s_title_scroll_x = 0;
+      }
+    } else {
+      s_title_scroll_x = 0;
+    }
+    
+    // 歌手滚动
+    bool artist_scroll = draw_scrolling_text_with_icon(dst, y_artist, s_np_artist, s_artist_scroll_x,
+                                                        14, c_artist, safe_pad, draw_artist_icon_img);
+    if (artist_scroll) {
+      s_artist_scroll_x += SCROLL_SPEED;
+      extern lgfx::U8g2font g_font_cjk;
+      dst->setFont(&g_font_cjk);
+      int artist_w = dst->textWidth(s_np_artist.c_str());
+      if (s_artist_scroll_x > artist_w + SCROLL_GAP) {
+        s_artist_scroll_x = 0;
+      }
+    } else {
+      s_artist_scroll_x = 0;
+    }
+  } else {
+    // 使用当前偏移绘制
+    draw_scrolling_text_with_icon(dst, y_title, s_np_title, s_title_scroll_x, 
+                                  14, c_title, safe_pad, draw_note_icon_img);
+    draw_scrolling_text_with_icon(dst, y_artist, s_np_artist, s_artist_scroll_x,
+                                  14, c_artist, safe_pad, draw_artist_icon_img);
+  }
 
   uint32_t t_text = millis();
 
@@ -1074,6 +1135,10 @@ void ui_set_now_playing(const char* title, const char* artist)
   ui_lock();
   s_np_title  = title  ? String(title)  : String("");
   s_np_artist = artist ? String(artist) : String("");
+  // 切歌时重置滚动偏移
+  s_title_scroll_x = 0;
+  s_artist_scroll_x = 0;
+  s_scroll_last_ms = 0;
   ui_unlock();
 }
 
@@ -1082,6 +1147,8 @@ void ui_set_album(const String& album)
   ui_lock();
   s_np_album = album;
   ui_unlock();
+  // 切歌时重置专辑滚动偏移
+  reset_album_scroll();
 }
 
 void ui_set_volume(uint8_t vol)

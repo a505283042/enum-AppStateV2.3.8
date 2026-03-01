@@ -167,7 +167,12 @@ void LyricsParser::sortByTime() {
 int LyricsParser::getCurrentIndex(uint32_t time_ms) const {
     if (m_lines.empty()) return -1;
     
-    int index = -1;
+    // 如果时间小于第一句，返回 0（显示第一句，等待播放）
+    if (time_ms < m_lines[0].time_ms) {
+        return 0;
+    }
+    
+    int index = 0;
     for (int i = 0; i < (int)m_lines.size(); i++) {
         if (m_lines[i].time_ms <= time_ms) {
             index = i;
@@ -248,6 +253,7 @@ bool LyricsDisplay::loadFromPath(const char* lrc_path) {
     uint32_t t1 = millis();
     
     if (success) {
+        m_currentIndex = 0;  // 初始化为第一句，避免第一帧闪烁
         LOGI("[LYRICS] Loaded %d lines in %lums", m_parser.getLineCount(), t1-t0);
     } else {
         LOGW("[LYRICS] Failed to load: %s", lrc_path);
@@ -323,7 +329,8 @@ LyricsDisplay::ScrollLyrics LyricsDisplay::getScrollLyrics() const {
         uint32_t currStart = currLine->time_ms;
         uint32_t nextStart = getNextLyricTime();
         
-        if (nextStart > currStart) {
+        // 只有当播放时间超过当前句开始时间时才计算进度
+        if (nextStart > currStart && m_currentTime >= currStart) {
             uint32_t duration = nextStart - currStart;
             uint32_t elapsed = m_currentTime - currStart;
             result.progress = (float)elapsed / (float)duration;

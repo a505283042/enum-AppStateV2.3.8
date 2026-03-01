@@ -5,6 +5,9 @@
 // 封面尺寸常量（需要与 ui.cpp 保持一致）
 static constexpr int COVER_SIZE = 240;
 
+// 滚动文本参数
+static constexpr int SCROLL_GAP_CHARS = 2;  // 副本间距（字符数）
+
 // 外部声明 TFT 对象
 extern LGFX tft;
 
@@ -16,6 +19,34 @@ static int utf8_char_len(uint8_t c)
   if ((c & 0xF0) == 0xE0) return 3;
   if ((c & 0xF8) == 0xF0) return 4;
   return 1;
+}
+
+// 获取指定位置的UTF-8字符宽度（像素）
+static int get_char_width(LGFX_Sprite* dst, const String& text, int byte_pos)
+{
+  if (byte_pos >= (int)text.length()) return 0;
+  
+  int char_len = utf8_char_len((uint8_t)text[byte_pos]);
+  String ch = text.substring(byte_pos, byte_pos + char_len);
+  return dst->textWidth(ch.c_str());
+}
+
+// 计算从开头到指定字符位置的累计宽度
+static int get_text_width_to_pos(LGFX_Sprite* dst, const String& text, int char_index)
+{
+  int width = 0;
+  int byte_pos = 0;
+  int current_char = 0;
+  
+  while (byte_pos < (int)text.length() && current_char < char_index) {
+    int char_len = utf8_char_len((uint8_t)text[byte_pos]);
+    String ch = text.substring(byte_pos, byte_pos + char_len);
+    width += dst->textWidth(ch.c_str());
+    byte_pos += char_len;
+    current_char++;
+  }
+  
+  return width;
 }
 
 void draw_center_text(const char* s, int y)
@@ -295,3 +326,134 @@ void draw_center_text_on_sprite(LGFX_Sprite* dst,
   dst->setCursor(x, y);
   dst->print(t);
 }
+
+// 滚动文本绘制（支持副本滚动）
+bool draw_scrolling_text(LGFX_Sprite* dst,
+                         int y,
+                         const String& text,
+                         int& scroll_x,
+                         int max_w,
+                         uint16_t fg,
+                         int gap)
+{
+  extern lgfx::U8g2font g_font_cjk;
+  
+  if (!dst || text.length() == 0) return false;
+  
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  
+  int text_w = dst->textWidth(text.c_str());
+  
+  // 如果文本不需要滚动
+  if (text_w <= max_w) {
+    int x = -scroll_x;  // 使用 scroll_x 作为偏移（通常为0）
+    if (x < 0) x = 0;
+    dst->setTextColor(fg);
+    dst->setCursor(x, y);
+    dst->print(text);
+    return false;
+  }
+  
+  // 需要滚动：绘制文本 + 副本
+  dst->setTextColor(fg);
+  
+  // 设置裁剪区域
+  int clip_x1 = 0;
+  int clip_x2 = max_w;
+  
+  // 绘制原始文本
+  int x1 = -scroll_x;
+  if (x1 + text_w > clip_x1 && x1 < clip_x2) {
+    dst->setCursor(x1, y);
+    dst->print(text);
+  }
+  
+  // 绘制副本文本
+  int x2 = -scroll_x + text_w + gap;
+  if (x2 + text_w > clip_x1 && x2 < clip_x2) {
+    dst->setCursor(x2, y);
+    dst->print(text);
+  }
+  
+  return true;
+}
+
+// 绘制带图标的滚动文本（像素滚动）
+bool draw_scrolling_text_with_icon(LGFX_Sprite* dst,
+                                   int y,
+                                   const String& text,
+                                   int& scroll_x,
+                                   int icon_w,
+                                   uint16_t fg,
+                                   int safe_pad,
+                                   void (*draw_icon)(LGFX_Sprite*, int, int, uint16_t))
+{
+  extern lgfx::U8g2font g_font_cjk;
+  
+  if (!dst || text.length() == 0) return false;
+  
+  dst->setFont(&g_font_cjk);
+  dst->setTextSize(1);
+  dst->setTextWrap(false);
+  
+  // 计算圆屏安全区域
+  int x0, w;
+  circle_span(y, safe_pad, x0, w);
+  if (w <= 30) return false;
+  
+  const int ICON_GAP = 2;
+  const int SCROLL_GAP = 20;  // 副本间距（像素）
+  int text_max_w = w - icon_w - ICON_GAP;
+  if (text_max_w < 20) return false;
+  
+  int text_w = dst->textWidth(text.c_str());
+  bool need_scroll = (text_w > text_max_w);
+  
+  if (!need_scroll) {
+    // 不需要滚动：居中显示图标+文本
+    int total_w = icon_w + ICON_GAP + text_w;
+    int start_x = x0 + (w - total_w) / 2;
+    
+    if (draw_icon) {
+      draw_icon(dst, start_x, y - 14 + 16, fg);
+    }
+    
+    dst->setTextColor(fg);
+    dst->setCursor(start_x + icon_w + ICON_GAP, y);
+    dst->print(text);
+    
+    return false;
+  }
+  
+  // 需要滚动
+  int start_x = x0;
+  
+  // 绘制图标（固定位置）
+  if (draw_icon) {
+    draw_icon(dst, start_x, y - 14 + 16, fg);
+  }
+  
+  int text_start_x = start_x + icon_w + ICON_GAP;
+  int text_max_x = x0 + w;
+  
+  // 设置裁剪区域
+  dst->setClipRect(text_start_x, 0, text_max_x - text_start_x, dst->height());
+  dst->setTextColor(fg);
+  
+  // 主文本位置（像素滚动）
+  int x1 = text_start_x - scroll_x;
+  dst->setCursor(x1, y);
+  dst->print(text);
+  
+  // 副本文本位置
+  int x2 = x1 + text_w + SCROLL_GAP;
+  dst->setCursor(x2, y);
+  dst->print(text);
+  
+  dst->clearClipRect();
+  
+  return true;
+}
+
+// 绘制滚动文本（无图标）
