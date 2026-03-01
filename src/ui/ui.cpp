@@ -130,7 +130,6 @@ void ui_hold_render(bool hold)
   } else {
     // 解除 hold 时，立即通知 UI 任务唤醒，避免等待下一个周期
     if (s_ui_task) {
-      LOGI("[UI] hold=false, notify UI task at %lu", millis());
       xTaskNotifyGive(s_ui_task);
     }
   }
@@ -633,12 +632,6 @@ static void cover_info_draw()
 
   uint32_t t_push = millis();
 
-  uint32_t t_total = t_push - t0;
-  if (t_total > 30) {
-    LOGI("[UI] total=%lums: cover=%lums, lyrics=%lums, status=%lums, text=%lums, push=%lums", 
-         t_total, t_cover-t0, t_lyrics-t_cover, t_status-t_lyrics, t_text-t_status, t_push-t_text);
-  }
-
   uint8_t tmp = s_front;
   s_front = s_back;
   s_back  = tmp;
@@ -680,13 +673,6 @@ static void ui_task_entry(void*)
 
     // 只在 PLAYER 界面、封面就绪时推屏
     if (s_screen == UI_SCREEN_PLAYER && s_coverSprReady && s_framesInited) {
-      static uint32_t last_render_ms = 0;
-      if (now_ms - last_render_ms > 500) {
-        LOGI("[UI] render start: screen=%d coverReady=%d framesInited=%d", 
-             s_screen, s_coverSprReady, s_framesInited);
-      }
-      last_render_ms = now_ms;
-
       ui_lock();
 
       // 更新歌词时间（在绘制前更新）
@@ -1116,6 +1102,9 @@ void ui_clear_screen()
 // ===== 播放器视图切换 =====
 enum ui_player_view_t ui_get_view() { return s_view; }
 
+// 设置播放器视图（带线程锁保护）
+// 参数: new_view - 新视图类型（ROTATE旋转封面 或 INFO信息详情）
+// 功能: 更新视图状态，重置旋转时间戳防止角度跳变
 static inline void ui_set_view(ui_player_view_t new_view)
 {
   const uint32_t now_ms = millis();
@@ -1125,9 +1114,13 @@ static inline void ui_set_view(ui_player_view_t new_view)
   ui_unlock();
 }
 
+// 切换播放器视图（长按PLAY键触发）
+// 在旋转视图(ROTATE)和信息视图(INFO)之间切换
 void ui_toggle_view()
 {
+  LOGI("[UI] toggle_view: current=%d", (int)s_view);
   ui_set_view((s_view == UI_VIEW_ROTATE) ? UI_VIEW_INFO : UI_VIEW_ROTATE);
+  LOGI("[UI] toggle_view: new=%d", (int)s_view);
 }
 
 void ui_set_now_playing(const char* title, const char* artist)

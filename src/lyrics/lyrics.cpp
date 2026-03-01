@@ -51,12 +51,10 @@ bool LyricsParser::loadFromFile(const char* path) {
     
     uint32_t t2 = millis();
     
-    LOGI("[LYRICS] Loaded file: %s (%d bytes)", path, content.length());
     bool result = parse(content);
     
     uint32_t t3 = millis();
-    LOGI("[LYRICS] Timing: open=%lums, read=%lums, parse=%lums, total=%lums", 
-         t1-t0, t2-t1, t3-t2, t3-t0);
+    LOGI("[LYRICS] Loaded: %s (%d bytes, %lums)", path, content.length(), t3-t0);
     
     return result;
 }
@@ -87,8 +85,6 @@ bool LyricsParser::parse(const String& content) {
     }
     
     sortByTime();
-    
-    LOGI("[LYRICS] Parsed %d lines", (int)m_lines.size());
     return !m_lines.empty();
 }
 
@@ -225,16 +221,11 @@ LyricsDisplay::~LyricsDisplay() {}
 bool LyricsDisplay::loadForTrack(const char* audio_path) {
     clear();
     
-    LOGI("[LYRICS] Loading lyrics for: %s", audio_path);
-    
     String lyricsPath = LyricsParser::findLyricsFile(audio_path);
     
     if (lyricsPath.length() == 0) {
-        LOGI("[LYRICS] No lyrics file found for: %s", audio_path);
         return false;
     }
-    
-    LOGI("[LYRICS] Found lyrics file: %s", lyricsPath.c_str());
     
     return loadFromPath(lyricsPath.c_str());
 }
@@ -254,9 +245,8 @@ bool LyricsDisplay::loadFromPath(const char* lrc_path) {
     
     if (success) {
         m_currentIndex = 0;  // 初始化为第一句，避免第一帧闪烁
-        LOGI("[LYRICS] Loaded %d lines in %lums", m_parser.getLineCount(), t1-t0);
     } else {
-        LOGW("[LYRICS] Failed to load: %s", lrc_path);
+        LOGW("[LYRICS] Failed: %s", lrc_path);
     }
     return success;
 }

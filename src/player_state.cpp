@@ -124,7 +124,6 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
 
     LOGI("[PLAYER] play #%d: %s", s_cur, t.audio_path.c_str());
     // ✅ 先冻结 UI，避免新文字画在旧封面上
-    LOGI("[PLAYER] step1: hold UI at %lu", millis());
     ui_hold_render(true);
 
     if (verbose) {
@@ -150,7 +149,6 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     }
 
     // ✅ 封面复用：同一首歌的"停止后再播放"不必重复解码
-    LOGI("[PLAYER] step2: load cover at %lu", millis());
     bool need_decode_cover = (force_cover || s_cover_idx != s_cur);
     if (need_decode_cover) {
         // 步骤1：从 SD 读取封面到内存（SD 卡操作）
@@ -162,7 +160,6 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     
     // ✅ 在封面缩放（不访问 SD）的同时加载歌词
     // 封面缩放只使用 CPU，此时 SD 卡空闲，可以并行加载歌词
-    LOGI("[PLAYER] step3: scale cover + load lyrics (parallel) at %lu", millis());
     
     struct LrcTaskParam {
         const char* path;
@@ -193,8 +190,6 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     } else {
         g_lyricsDisplay.clear();
     }
-    
-    LOGI("[PLAYER] step4: cover + lyrics done at %lu", millis());
 
     // ✅ 封面准备好后，再更新文字（这样文字不会先叠在旧封面上）
     ui_set_now_playing(t.title.c_str(), t.artist.c_str());
@@ -220,7 +215,6 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     ui_set_volume(audio_get_volume());
 
     // ✅ 解冻 UI，让 UI 先显示封面（歌词稍后加载）
-    LOGI("[PLAYER] step4: unhold UI at %lu", millis());
     ui_hold_render(false);
     
     // 加载歌词文件（UI 已解冻，用户可以先看到封面）
@@ -229,7 +223,6 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     } else {
         g_lyricsDisplay.clear();
     }
-    LOGI("[PLAYER] step5: lyrics loaded at %lu", millis());
 
     if (!audio_service_play(t.audio_path.c_str(), true)) {
         LOGE("[AUDIO] play failed");
