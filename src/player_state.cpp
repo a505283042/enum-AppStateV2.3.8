@@ -27,6 +27,9 @@ static int  s_cover_idx = -1;
 static int s_current_group_idx = 0;
 static int s_current_track_in_group = 0;
 
+// 前向声明
+static void regenerate_random_table();
+
 // 根据当前歌曲查找所属的歌手组索引
 static int find_current_artist_group(void)
 {
@@ -430,9 +433,20 @@ void player_next_group()
         s_current_group_idx = (s_current_group_idx + 1) % (int)groups.size();
         String next_artist = groups[s_current_group_idx].name;
 
-        // 播放该组的第一个歌曲
+        // 如果是随机模式，重新生成随机表
+        if (g_play_mode == PLAY_MODE_ARTIST_RND) {
+            regenerate_random_table();
+        }
+
+        // 播放该组的第一个歌曲（随机模式下播放随机表第一首）
         if (!groups[s_current_group_idx].track_indices.empty()) {
-            int next_track = groups[s_current_group_idx].track_indices[0];
+            int next_track;
+            if (g_play_mode == PLAY_MODE_ARTIST_RND && s_random_table_size > 0) {
+                next_track = s_random_table[0];
+                s_random_table_pos = 1;
+            } else {
+                next_track = groups[s_current_group_idx].track_indices[0];
+            }
             LOGI("[PLAYER] 切换到歌手组: %s (%d/%d)",
                  next_artist.c_str(), s_current_group_idx + 1, (int)groups.size());
             player_play_idx(next_track, false, true);
@@ -446,9 +460,20 @@ void player_next_group()
         s_current_group_idx = (s_current_group_idx + 1) % (int)groups.size();
         String next_album = groups[s_current_group_idx].name;
 
-        // 播放该组的第一个歌曲
+        // 如果是随机模式，重新生成随机表
+        if (g_play_mode == PLAY_MODE_ALBUM_RND) {
+            regenerate_random_table();
+        }
+
+        // 播放该组的第一个歌曲（随机模式下播放随机表第一首）
         if (!groups[s_current_group_idx].track_indices.empty()) {
-            int next_track = groups[s_current_group_idx].track_indices[0];
+            int next_track;
+            if (g_play_mode == PLAY_MODE_ALBUM_RND && s_random_table_size > 0) {
+                next_track = s_random_table[0];
+                s_random_table_pos = 1;
+            } else {
+                next_track = groups[s_current_group_idx].track_indices[0];
+            }
             LOGI("[PLAYER] 切换到专辑组: %s (%d/%d)",
                  next_album.c_str(), s_current_group_idx + 1, (int)groups.size());
             player_play_idx(next_track, false, true);
@@ -458,6 +483,37 @@ void player_next_group()
         // 全部模式下，长按 NEXT 跳到最后一首
         LOGI("[PLAYER] 跳到最后一首");
         player_play_idx((int)tracks_list.size() - 1, false, true);
+    }
+}
+
+// 重新生成当前播放列表的随机表（切换歌手/专辑组时调用）
+static void regenerate_random_table()
+{
+    std::vector<int> playlist = get_current_playlist();
+    if (!playlist.empty()) {
+        int total = (int)playlist.size();
+        s_random_table_size = (total > RANDOM_TABLE_MAX) ? RANDOM_TABLE_MAX : total;
+        s_random_table_pos = 0;
+
+        if (total > RANDOM_TABLE_MAX) {
+            LOGW("[PLAYER] 随机表容量=%d，但曲目=%d，已截断到前 %d 首（防止溢出）",
+                 RANDOM_TABLE_MAX, total, s_random_table_size);
+        }
+
+        for (int i = 0; i < s_random_table_size; i++) {
+            s_random_table[i] = playlist[i];
+        }
+        for (int i = s_random_table_size - 1; i > 0; i--) {
+            int j = random(i + 1);
+            int temp = s_random_table[i];
+            s_random_table[i] = s_random_table[j];
+            s_random_table[j] = temp;
+        }
+
+        LOGI("[PLAYER] 随机表已重新生成 (大小: %d)", s_random_table_size);
+    } else {
+        s_random_table_size = 0;
+        LOGI("[PLAYER] 随机表为空 (无歌曲)");
     }
 }
 
@@ -480,32 +536,8 @@ void player_toggle_random()
                       g_play_mode == PLAY_MODE_ALBUM_RND);
 
     if (is_random) {
-        std::vector<int> playlist = get_current_playlist();
-        if (!playlist.empty()) {
-            int total = (int)playlist.size();
-            s_random_table_size = (total > RANDOM_TABLE_MAX) ? RANDOM_TABLE_MAX : total;
-            s_random_table_pos = 0;
-
-            if (total > RANDOM_TABLE_MAX) {
-                LOGW("[PLAYER] 随机表容量=%d，但曲目=%d，已截断到前 %d 首（防止溢出）",
-                     RANDOM_TABLE_MAX, total, s_random_table_size);
-            }
-
-            for (int i = 0; i < s_random_table_size; i++) {
-                s_random_table[i] = playlist[i];
-            }
-            for (int i = s_random_table_size - 1; i > 0; i--) {
-                int j = random(i + 1);
-                int temp = s_random_table[i];
-                s_random_table[i] = s_random_table[j];
-                s_random_table[j] = temp;
-            }
-
-            LOGI("[PLAYER] 随机播放: 开启 (索引表大小: %d)", s_random_table_size);
-        } else {
-            s_random_table_size = 0;
-            LOGI("[PLAYER] 随机播放: 开启 (无歌曲)");
-        }
+        regenerate_random_table();
+        LOGI("[PLAYER] 随机播放: 开启 (索引表大小: %d)", s_random_table_size);
     } else {
         s_random_table_size = 0;
         LOGI("[PLAYER] 随机播放: 关闭");
