@@ -582,18 +582,19 @@ std::vector<PlaylistGroup> storage_get_artist_groups(void)
   std::map<String, int> artist_map;
 
   for (int i = 0; i < (int)s_tracks.size(); i++) {
-    // 拆分多歌手，将歌曲添加到每个歌手的组中
+    // 拆分多歌手，只将歌曲添加到第一个歌手的组中
     std::vector<String> artists = split_artists(s_tracks[i].artist);
 
-    for (const String& artist : artists) {
-      if (artist_map.find(artist) == artist_map.end()) {
+    if (!artists.empty()) {
+      const String& first_artist = artists[0];
+      if (artist_map.find(first_artist) == artist_map.end()) {
         PlaylistGroup group;
-        group.name = artist;
+        group.name = first_artist;
         groups.push_back(group);
-        artist_map[artist] = (int)groups.size() - 1;
+        artist_map[first_artist] = (int)groups.size() - 1;
       }
 
-      int group_idx = artist_map[artist];
+      int group_idx = artist_map[first_artist];
       groups[group_idx].track_indices.push_back(i);
     }
   }

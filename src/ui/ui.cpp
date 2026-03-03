@@ -406,13 +406,20 @@ static void cover_sprite_init_once()
   // 原始封面精灵（供 ROTATE 视图旋转）
   s_coverSpr.setColorDepth(16);
   s_coverSpr.setPsram(has_psram);
-  s_coverSpr.createSprite(COVER_SIZE, COVER_SIZE);
+  if (!s_coverSpr.createSprite(COVER_SIZE, COVER_SIZE)) {
+    LOGW("[COVER] s_coverSpr.createSprite(%d,%d) failed", COVER_SIZE, COVER_SIZE);
+    return;
+  }
   s_coverSpr.fillScreen(TFT_BLACK);
 
   // 带遮罩封面精灵（供 INFO 视图显示）
   s_coverMasked.setColorDepth(16);
   s_coverMasked.setPsram(has_psram);
-  s_coverMasked.createSprite(COVER_SIZE, COVER_SIZE);
+  if (!s_coverMasked.createSprite(COVER_SIZE, COVER_SIZE)) {
+    LOGW("[COVER] s_coverMasked.createSprite(%d,%d) failed", COVER_SIZE, COVER_SIZE);
+    s_coverSpr.deleteSprite();
+    return;
+  }
   s_coverMasked.fillScreen(TFT_BLACK);
 
   s_coverSprInited = true;
@@ -432,7 +439,14 @@ static void cover_frames_init_once()
   for (int i = 0; i < 2; ++i) {
     s_frame[i]->setColorDepth(16);
     s_frame[i]->setPsram(has_psram);
-    s_frame[i]->createSprite(COVER_SIZE, COVER_SIZE);
+    if (!s_frame[i]->createSprite(COVER_SIZE, COVER_SIZE)) {
+      LOGW("[COVER] s_frame[%d].createSprite(%d,%d) failed", i, COVER_SIZE, COVER_SIZE);
+      // 清理已创建的精灵
+      for (int j = 0; j < i; ++j) {
+        s_frame[j]->deleteSprite();
+      }
+      return;
+    }
     s_frame[i]->fillScreen(TFT_BLACK);
   }
   s_front = 0;
@@ -443,7 +457,14 @@ static void cover_frames_init_once()
   for (int i = 0; i < 2; ++i) {
     s_rotFrame[i]->setColorDepth(16);
     s_rotFrame[i]->setPsram(has_psram);
-    s_rotFrame[i]->createSprite(COVER_SIZE, COVER_SIZE);
+    if (!s_rotFrame[i]->createSprite(COVER_SIZE, COVER_SIZE)) {
+      LOGW("[COVER] s_rotFrame[%d].createSprite(%d,%d) failed", i, COVER_SIZE, COVER_SIZE);
+      // 清理已创建的精灵
+      for (int j = 0; j < i; ++j) {
+        s_rotFrame[j]->deleteSprite();
+      }
+      return;
+    }
     s_rotFrame[i]->fillScreen(TFT_BLACK);
   }
   s_rotFront = 0;
@@ -553,7 +574,10 @@ static void cover_info_draw()
     } else {
       anim_progress_int = 100;
     }
-    
+    // 安全检查：确保不越界
+    if (anim_progress_int > 100) anim_progress_int = 100;
+    if (anim_progress_int < 0) anim_progress_int = 0;
+
     // 查表获取缓动值，计算偏移（避免浮点运算）
     int offset = (ease_table[anim_progress_int] * LINE_HEIGHT) / 100;
     
