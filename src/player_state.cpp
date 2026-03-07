@@ -27,6 +27,11 @@ static int  s_cover_idx = -1;
 static int s_current_group_idx = 0;
 static int s_current_track_in_group = 0;
 
+// 列表选择模式状态
+static ListSelectState s_list_state = ListSelectState::NONE;
+static int s_list_selected_idx = 0;
+static std::vector<PlaylistGroup> s_list_groups;  // 缓存当前列表
+
 // 前向声明
 static void regenerate_random_table();
 
@@ -281,6 +286,9 @@ void player_state_run(void)
 
     // ✅ 播放自然结束 -> 下一首（循环或随机）
     if (entered && s_started && !tracks_list.empty() && !s_user_paused && !audio_service_is_playing()) {
+        std::vector<int> playlist = get_current_playlist();
+        if (playlist.empty()) return;
+        
         int next;
         if (g_random_play) {
             if (s_random_table_size > 0) {
@@ -290,8 +298,25 @@ void player_state_run(void)
                 next = s_cur;
             }
         } else {
-            next = s_cur + 1;
-            if (next >= (int)tracks_list.size()) next = 0;
+            // 在当前播放列表中找到当前歌曲的位置
+            int current_pos = -1;
+            for (int i = 0; i < (int)playlist.size(); i++) {
+                if (playlist[i] == s_cur) {
+                    current_pos = i;
+                    break;
+                }
+            }
+            
+            if (current_pos >= 0) {
+                current_pos++;
+                if (current_pos >= (int)playlist.size()) {
+                    current_pos = 0;
+                }
+                next = playlist[current_pos];
+            } else {
+                next = s_cur + 1;
+                if (next >= (int)tracks_list.size()) next = 0;
+            }
         }
         player_play_idx(next, false, true);
     }
@@ -419,70 +444,140 @@ void player_volume_step(int delta)
     ui_set_volume((uint8_t)v);
 }
 
-// 长按 NEXT：切换到下一个歌手/专辑组
+// 长按 NEXT：进入列表选择模式（歌手/专辑模式下）
 void player_next_group()
 {
     const auto& tracks_list = storage_get_tracks();
     if (tracks_list.empty()) return;
 
     if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND) {
-        auto groups = storage_get_artist_groups();
-        if (groups.empty()) return;
-
-        // 切换到下一个歌手组
-        s_current_group_idx = (s_current_group_idx + 1) % (int)groups.size();
-        String next_artist = groups[s_current_group_idx].name;
-
-        // 如果是随机模式，重新生成随机表
-        if (g_play_mode == PLAY_MODE_ARTIST_RND) {
-            regenerate_random_table();
+        // 进入歌手列表选择模式
+        s_list_groups = storage_get_artist_groups();
+        if (s_list_groups.empty()) {
+            s_list_state = ListSelectState::NONE;
+            s_current_group_idx = 0;
+            return;
         }
-
-        // 播放该组的第一个歌曲（随机模式下播放随机表第一首）
-        if (!groups[s_current_group_idx].track_indices.empty()) {
-            int next_track;
-            if (g_play_mode == PLAY_MODE_ARTIST_RND && s_random_table_size > 0) {
-                next_track = s_random_table[0];
-                s_random_table_pos = 1;
-            } else {
-                next_track = groups[s_current_group_idx].track_indices[0];
-            }
-            LOGI("[PLAYER] 切换到歌手组: %s (%d/%d)",
-                 next_artist.c_str(), s_current_group_idx + 1, (int)groups.size());
-            player_play_idx(next_track, false, true);
+        
+        // 设置当前选中项为当前歌手组
+        s_list_selected_idx = s_current_group_idx;
+        if (s_list_selected_idx >= (int)s_list_groups.size()) {
+            s_list_selected_idx = 0;
         }
+        
+        s_list_state = ListSelectState::ARTIST;
+        LOGI("[LIST] 进入歌手列表选择模式，共 %d 个歌手，当前选中: %d", 
+             (int)s_list_groups.size(), s_list_selected_idx + 1);
     }
     else if (g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
-        auto groups = storage_get_album_groups();
-        if (groups.empty()) return;
-
-        // 切换到下一个专辑组
-        s_current_group_idx = (s_current_group_idx + 1) % (int)groups.size();
-        String next_album = groups[s_current_group_idx].name;
-
-        // 如果是随机模式，重新生成随机表
-        if (g_play_mode == PLAY_MODE_ALBUM_RND) {
-            regenerate_random_table();
+        // 进入专辑列表选择模式
+        s_list_groups = storage_get_album_groups();
+        if (s_list_groups.empty()) {
+            s_list_state = ListSelectState::NONE;
+            s_current_group_idx = 0;
+            return;
         }
-
-        // 播放该组的第一个歌曲（随机模式下播放随机表第一首）
-        if (!groups[s_current_group_idx].track_indices.empty()) {
-            int next_track;
-            if (g_play_mode == PLAY_MODE_ALBUM_RND && s_random_table_size > 0) {
-                next_track = s_random_table[0];
-                s_random_table_pos = 1;
-            } else {
-                next_track = groups[s_current_group_idx].track_indices[0];
-            }
-            LOGI("[PLAYER] 切换到专辑组: %s (%d/%d)",
-                 next_album.c_str(), s_current_group_idx + 1, (int)groups.size());
-            player_play_idx(next_track, false, true);
+        
+        // 设置当前选中项为当前专辑组
+        s_list_selected_idx = s_current_group_idx;
+        if (s_list_selected_idx >= (int)s_list_groups.size()) {
+            s_list_selected_idx = 0;
         }
+        
+        s_list_state = ListSelectState::ALBUM;
+        LOGI("[LIST] 进入专辑列表选择模式，共 %d 个专辑，当前选中: %d", 
+             (int)s_list_groups.size(), s_list_selected_idx + 1);
     }
     else {
-        // 全部模式下，长按 NEXT 跳到最后一首
-        LOGI("[PLAYER] 跳到最后一首");
-        player_play_idx((int)tracks_list.size() - 1, false, true);
+        // 全部模式下，长按 NEXT 跳10首
+        int next = (s_cur + 10) % tracks_list.size();
+        LOGI("[PLAYER] 跳10首 -> #%d", next);
+        player_play_idx(next, false, true);
+    }
+}
+
+// 检查是否处于列表选择模式
+bool player_is_in_list_select_mode()
+{
+    return s_list_state != ListSelectState::NONE;
+}
+
+// 获取当前列表选择状态
+ListSelectState player_get_list_select_state()
+{
+    return s_list_state;
+}
+
+// 获取当前选中的列表索引
+int player_get_list_selected_idx()
+{
+    return s_list_selected_idx;
+}
+
+// 获取当前列表组
+const std::vector<PlaylistGroup>& player_get_list_groups()
+{
+    return s_list_groups;
+}
+
+// 处理列表选择模式的按键
+void player_handle_list_select_key(key_event_t evt)
+{
+    if (s_list_state == ListSelectState::NONE) return;
+    
+    int group_count = (int)s_list_groups.size();
+    if (group_count == 0) {
+        s_list_state = ListSelectState::NONE;
+        return;
+    }
+    
+    switch (evt) {
+        case KEY_NEXT_SHORT:
+            s_list_selected_idx = (s_list_selected_idx + 1) % group_count;
+            LOGI("[LIST] 选择下一项: %d/%d", s_list_selected_idx + 1, group_count);
+            break;
+            
+        case KEY_PREV_SHORT:
+            s_list_selected_idx = (s_list_selected_idx - 1 + group_count) % group_count;
+            LOGI("[LIST] 选择上一项: %d/%d", s_list_selected_idx + 1, group_count);
+            break;
+            
+        case KEY_VOLUP_SHORT:
+            s_list_selected_idx = (s_list_selected_idx + 5) % group_count;
+            LOGI("[LIST] 向下翻页: %d/%d", s_list_selected_idx + 1, group_count);
+            break;
+            
+        case KEY_VOLDN_SHORT:
+            s_list_selected_idx = (s_list_selected_idx - 5 + group_count) % group_count;
+            LOGI("[LIST] 向上翻页: %d/%d", s_list_selected_idx + 1, group_count);
+            break;
+            
+        case KEY_PLAY_SHORT:
+            // 确认选择
+            s_current_group_idx = s_list_selected_idx;
+            LOGI("[LIST] 确认选择: %s (%d/%d)", 
+                 s_list_groups[s_current_group_idx].name.c_str(),
+                 s_current_group_idx + 1, group_count);
+            
+            // 播放该组的第一个歌曲
+            if (!s_list_groups[s_current_group_idx].track_indices.empty()) {
+                int next_track = s_list_groups[s_current_group_idx].track_indices[0];
+                s_list_state = ListSelectState::NONE;
+                ui_clear_list_select(); // 重置列表选择界面状态
+                player_play_idx(next_track, false, true);
+            }
+            break;
+            
+        case KEY_MODE_SHORT:
+        case KEY_MODE_LONG:
+            // 取消选择（短按和长按都执行返回操作）
+            LOGI("[LIST] 取消选择");
+            s_list_state = ListSelectState::NONE;
+            ui_clear_list_select(); // 重置列表选择界面状态
+            break;
+            
+        default:
+            break;
     }
 }
 

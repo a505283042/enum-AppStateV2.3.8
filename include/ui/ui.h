@@ -70,4 +70,8 @@ void ui_set_track_pos(int idx, int total);
 
 void ui_hold_render(bool hold);
 
+// ===== 列表选择界面 =====
+void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_idx, const char* title);
+void ui_clear_list_select();
+
 #endif // UI_H

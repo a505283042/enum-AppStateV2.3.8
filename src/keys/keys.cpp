@@ -6,6 +6,7 @@
 #include "storage/storage_music.h"
 #include "ui/ui.h"
 #include "audio/audio_service.h"
+#include "player_state.h"
 
 // 你项目里这些函数/接口要能被调用
 void player_next_track();
@@ -13,7 +14,7 @@ void player_prev_track();
 void player_toggle_random();
 void player_toggle_play();
 void player_volume_step(int delta); // 下面我会给你 player_state.cpp 里加
-void player_next_group(); // 长按 NEXT：切换到下一个歌手/专辑组
+void player_next_group(); // 长按 NEXT：进入列表选择模式
 
 static inline bool pressed(int level) { return level == LOW; } // 按下接地
 
@@ -99,13 +100,33 @@ void keys_init()
 
 void keys_update()
 {
+  // 检查是否处于列表选择模式
+  if (player_is_in_list_select_mode()) {
+    // 列表选择模式下的按键处理
+    // MODE：短按=返回；长按=取消选择
+    handle_key(k_mode,  [](){ player_handle_list_select_key(KEY_MODE_SHORT); }, [](){ player_handle_list_select_key(KEY_MODE_LONG); });
+
+    // PLAY：短按=确认选择
+    handle_key(k_play,  [](){ player_handle_list_select_key(KEY_PLAY_SHORT); }, nullptr);
+
+    // PREV / NEXT：短按=上下移动选择
+    handle_key(k_prev,  [](){ player_handle_list_select_key(KEY_PREV_SHORT); }, nullptr);
+    handle_key(k_next,  [](){ player_handle_list_select_key(KEY_NEXT_SHORT); }, nullptr);
+
+    // VOL：短按=快速翻页
+    handle_key(k_voldn, [](){ player_handle_list_select_key(KEY_VOLDN_SHORT); }, nullptr);
+    handle_key(k_volup, [](){ player_handle_list_select_key(KEY_VOLUP_SHORT); }, nullptr);
+    return;
+  }
+
+  // 正常播放模式
   // MODE：短按=随机；长按=重扫
   handle_key(k_mode,  [](){ ui_mode_switch_highlight(); player_toggle_random(); }, start_rescan);
 
   // PLAY：短按=播放/停止；长按=切换视图
   handle_key(k_play,  player_toggle_play, ui_toggle_view);
 
-  // PREV / NEXT：短按=切歌，长按 NEXT=切换歌手/专辑组
+  // PREV / NEXT：短按=切歌，长按 NEXT=进入列表选择模式
   handle_key(k_prev,  player_prev_track, nullptr);
   handle_key(k_next,  player_next_track, player_next_group);
 

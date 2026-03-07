@@ -26,6 +26,7 @@
 #include <lgfx/v1/lgfx_fonts.hpp>
 #include "fonts/u8g2_font_wenquanyi_merged.h"
 #include "lyrics/lyrics.h"
+#include "player_state.h"
 
 lgfx::U8g2font g_font_cjk(u8g2_font_wenquanyi_merged);
 
@@ -41,6 +42,8 @@ static int utf8_char_len(uint8_t c)
 
 static TaskHandle_t s_ui_task = nullptr;
 static SemaphoreHandle_t s_ui_mtx = nullptr;
+
+
 
 static inline void ui_lock()   { if (s_ui_mtx) xSemaphoreTakeRecursive(s_ui_mtx, portMAX_DELAY); }
 static inline void ui_unlock() { if (s_ui_mtx) xSemaphoreGiveRecursive(s_ui_mtx); }
@@ -120,6 +123,9 @@ static uint8_t s_rotBack  = 1;
 static bool s_rotFramesInited = false;
 
 static LGFX_Sprite* s_src = nullptr;  // 指向 s_coverSpr，用于旋转
+
+// 列表选择模式缓存
+static int s_list_last_drawn_idx = -1;  // 上次绘制的列表选择索引
 
 static float s_angle_deg = 0.0f;
 static uint32_t s_rot_last_ms = 0;
@@ -693,8 +699,11 @@ static void cover_info_draw()
 
 static inline TickType_t ui_period_ticks()
 {
-  // hold 期间：不画，但要“醒得勤快一点”，保证解除 hold 后立刻恢复（这里按旋转帧率）
+  // hold 期间：不画，但要"醒得勤快一点"，保证解除 hold 后立刻恢复（这里按旋转帧率）
   if (s_ui_hold) return pdMS_TO_TICKS(1000 / UI_FPS_ROTATE);
+
+  // 列表选择模式：使用较高帧率以实现平滑滚动
+  if (player_is_in_list_select_mode()) return pdMS_TO_TICKS(1000 / 20);
 
   // PLAYER 界面：按视图区分帧率
   if (s_screen == UI_SCREEN_PLAYER) {
@@ -722,6 +731,17 @@ static void ui_task_entry(void*)
     // hold：不渲染，但刷新 rot 时钟，避免解除 hold 后 dt 巨大导致角度跳变
     if (s_ui_hold) {
       s_rot_last_ms = millis();
+      continue;
+    }
+
+    // 检查是否处于列表选择模式
+    if (player_is_in_list_select_mode()) {
+      // 列表选择模式下持续重绘（用于滚动显示）
+      int current_idx = player_get_list_selected_idx();
+      ListSelectState state = player_get_list_select_state();
+      const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
+      ui_draw_list_select(player_get_list_groups(), current_idx, title);
+      s_list_last_drawn_idx = current_idx;
       continue;
     }
 
@@ -1230,4 +1250,469 @@ void ui_set_track_pos(int idx, int total)
   if (idx < 0) idx = 0;
   s_ui_track_idx = idx;
   s_ui_track_total = total;
+}
+
+// =============================================================================
+// 列表选择界面绘制
+// =============================================================================
+// 字符串处理函数
+
+// 按像素宽度截断字符串，支持UTF-8中文字符
+// 参数: text - 原始字符串
+//       maxWidth - 最大像素宽度
+// 返回: 截断后的字符串（不含省略号）
+static String truncateByPixel(const String& text, int maxWidth)
+{
+  String result = text;
+  while (result.length() > 0 && tft.textWidth(result) > maxWidth) {
+    result = result.substring(0, result.length() - 1);
+    // 检查最后一个字符是否是中文字符（UTF-8多字节字符）
+    if (result.length() > 0) {
+      unsigned char last_char = result.charAt(result.length() - 1);
+      if (last_char >= 0x80) {
+        // 是多字节字符，删除整个字符
+        while (result.length() > 0 && (result.charAt(result.length() - 1) & 0xC0) == 0x80) {
+          result = result.substring(0, result.length() - 1);
+        }
+        if (result.length() > 0) {
+          result = result.substring(0, result.length() - 1);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+// 按字符偏移截取子串，支持UTF-8中文字符
+// 参数: text - 原始字符串
+//       charOffset - 字符偏移量（不是字节偏移）
+// 返回: 从偏移位置开始的子串
+static String getSubStrByCharOffset(const String& text, int charOffset)
+{
+  if (charOffset <= 0) return text;
+  
+  int char_count = 0;
+  int byte_pos = 0;
+  while (char_count < charOffset && byte_pos < text.length()) {
+    unsigned char c = text.charAt(byte_pos);
+    if ((c & 0x80) == 0) {
+      byte_pos++;  // ASCII字符，1字节
+    } else if ((c & 0xE0) == 0xC0) {
+      byte_pos += 2;  // 2字节UTF-8字符
+    } else if ((c & 0xF0) == 0xE0) {
+      byte_pos += 3;  // 3字节UTF-8字符（中文）
+    } else if ((c & 0xF8) == 0xF0) {
+      byte_pos += 4;  // 4字节UTF-8字符
+    } else {
+      byte_pos++;
+    }
+    char_count++;
+  }
+  
+  if (byte_pos < text.length()) {
+    return text.substring(byte_pos);
+  }
+  return "";
+}
+
+// 生成滚动文本（支持副本衔接）
+static String getScrollingText(const String& text, int charOffset, int maxWidth)
+{
+  // 这里增加 6 个空格作为衔接感，视觉上更自然
+  String gap = "      ";
+  String extendedText = text + gap + text;
+
+  // 从偏移量位置开始截取
+  String startedText = getSubStrByCharOffset(extendedText, charOffset);
+
+  // 关键：必须按像素宽度截断，确保它不会覆盖到后面的"（多少首）"
+  return truncateByPixel(startedText, maxWidth);
+}
+
+// =============================================================================
+// 滚动控制结构体
+struct ListScrollState {
+  int scroll_idx = -1;          // 当前滚动项索引
+  int scroll_offset = 0;        // 当前滚动偏移（字符数）
+  uint32_t last_scroll_time = 0; // 上次滚动时间
+  static constexpr uint32_t SCROLL_INTERVAL_MS = 500; // 调慢滚动
+  
+  // 重置滚动状态
+  void reset(int new_idx) {
+    scroll_idx = new_idx;
+    scroll_offset = 0;
+    last_scroll_time = millis();
+  }
+  
+  // 检查是否需要更新滚动（时间间隔到达）
+  bool shouldUpdate() {
+    uint32_t now = millis();
+    if (now - last_scroll_time >= SCROLL_INTERVAL_MS) {
+      last_scroll_time = now;
+      return true;
+    }
+    return false;
+  }
+  
+  // 更新滚动偏移
+  // 参数: name - 原始字符串
+  //       full_text_width - 完整文本宽度
+  //       available_width - 可用宽度
+  // 返回: 偏移是否有变化，需要重绘
+  bool update(const String& name, int full_text_width, int available_width) {
+    if (full_text_width <= available_width) {
+      // 文本无需滚动，保持偏移0
+      scroll_offset = 0;
+      return false;
+    }
+
+    scroll_offset++;
+    
+    // 计算字符总长度（用于循环）
+    // 为了美观，我们在衔接处多加几个空格，例如 "歌曲名    歌曲名"
+    int char_len = 0;
+    for (int i = 0; i < name.length(); ) {
+      unsigned char c = name.charAt(i);
+      if ((c & 0x80) == 0) i += 1;
+      else if ((c & 0xE0) == 0xC0) i += 2;
+      else if ((c & 0xF0) == 0xE0) i += 3;
+      else i += 4;
+      char_len++;
+    }
+
+    // 假设衔接间隔为 4 个空格
+    if (scroll_offset >= char_len + 4) {
+      scroll_offset = 0;
+    }
+    return true;
+  }
+};
+
+// 列表选择界面静态变量
+static int s_last_selected_idx = -1;
+static int s_last_start_idx = -1;
+static bool s_first_draw = true;
+static int last_drawn_selected = -1;
+static int last_drawn_offset = -1;
+static ListScrollState s_scroll_state; // 滚动状态
+
+// =============================================================================
+// 绘制辅助函数
+
+// 绘制列表框架（标题、分隔线、滚动条、底部提示）
+// 参数: title - 标题文字
+//       start_idx - 当前显示起始索引
+//       total - 总项目数
+//       visible - 可见项目数
+static void drawListFrame(const char* title, int start_idx, int total, int visible)
+{
+  // 绘制标题
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE);
+  draw_center_text(title, 25);
+
+  // 绘制分隔线
+  tft.drawFastHLine(20, 40, 200, TFT_WHITE);
+
+  // 绘制滚动指示器
+  if (total > visible) {
+    const int ITEM_HEIGHT = 18;
+    const int START_Y = 60;
+    int bar_height = visible * ITEM_HEIGHT;
+    int bar_y = START_Y - 7;
+    int thumb_height = (visible * bar_height) / total;
+    if (thumb_height < 10) thumb_height = 10;
+
+    int thumb_y = bar_y + (start_idx * (bar_height - thumb_height)) / (total - visible);
+    
+    // 确保滑块不超出滚动条范围
+    if (thumb_y < bar_y) thumb_y = bar_y;
+    if (thumb_y + thumb_height > bar_y + bar_height) thumb_y = bar_y + bar_height - thumb_height;
+
+    tft.drawRect(225, bar_y, 4, bar_height, TFT_DARKGREY);
+    tft.fillRect(225, thumb_y, 4, thumb_height, TFT_WHITE);
+  }
+
+  // 绘制底部提示（分两行，居中显示）
+  tft.setTextColor(TFT_LIGHTGREY);
+  draw_center_text("NEXT/PREV:选择 VOL:翻页", 171);
+  draw_center_text("PLAY:确认 MODE:取消", 185);
+}
+
+// 绘制单个列表项
+// 参数: group - 列表组数据
+//       idx - 项目索引
+//       list_pos - 列表中的显示位置（0-4）
+//       is_selected - 是否选中
+//       scroll_offset - 滚动偏移（仅选中项有效）
+//       draw_bg - 是否绘制背景（默认true，滚动更新时可设为false避免重绘背景）
+static void drawListItem(const PlaylistGroup& group, int idx, int list_pos, 
+                         bool is_selected, int scroll_offset = 0, bool draw_bg = true)
+{
+  const int ITEM_HEIGHT = 18;
+  const int START_Y = 60;
+  int y = START_Y + list_pos * ITEM_HEIGHT;
+  
+  // 绘制选中背景（仅在需要时绘制）
+  if (is_selected && draw_bg) {
+    tft.fillRoundRect(15, y - ITEM_HEIGHT / 2, 200, ITEM_HEIGHT, 5, 0x4208);
+  }
+
+  // 设置文本颜色
+  tft.setTextColor(is_selected ? TFT_YELLOW : TFT_WHITE);
+
+  String name = group.name;
+  
+  // 计算序号宽度
+  String prefix = String(idx + 1) + ". ";
+  int prefix_width = tft.textWidth(prefix);
+  
+  // 计算歌曲数量宽度
+  String count = "(" + String(group.track_indices.size()) + "首)";
+  int count_width = tft.textWidth(count);
+  
+  // 重点：计算中间的可显示区域
+  int list_left_edge = 25;           // 列表文字起始 X
+  int list_right_edge = 210;         // 列表文字结束 X (留点边距)
+  
+  int text_start_x = list_left_edge + prefix_width;
+  int text_end_x = list_right_edge - count_width;
+  int available_width = text_end_x - text_start_x;
+  
+  // 检查是否需要滚动
+  int name_width = tft.textWidth(name);
+  bool need_scroll = is_selected && (name_width > available_width);
+  
+  if (need_scroll) {
+    // 使用新的副本衔接函数
+    // 注意：这里不再需要判断 scroll_offset > 0，因为 0 也是合法的起始位置
+    String scroll_name = getScrollingText(name, scroll_offset, available_width);
+    
+    // 1. 正常绘制序号
+    tft.setCursor(list_left_edge, y - 7);
+    tft.print(prefix);
+    
+    // 2. 设置裁剪区域：只允许在 [text_start_x] 到 [text_end_x] 之间显示
+    tft.setClipRect(text_start_x, y - 10, available_width, 20);
+    
+    tft.setCursor(text_start_x, y - 7);
+    tft.print(scroll_name);
+    
+    // 3. 立即清除裁剪设置，否则后面所有的绘制都看不见了
+    tft.clearClipRect();
+
+    // 4. 绘制数量（它会在 text_end_x 之后，不会被滚动文字覆盖）
+    tft.setTextColor(TFT_LIGHTGREY);
+    tft.setCursor(list_right_edge - count_width, y - 7);
+    tft.print(count);
+  } else {
+    // 非滚动状态：截断显示
+    String display_name = name;
+    
+    if (name_width > available_width) {
+      // 需要截断
+      display_name = truncateByPixel(name, available_width);
+      // 添加"…"占位符
+      if (display_name.length() < name.length()) {
+        int ellipsis_width = tft.textWidth("...");
+        if (tft.textWidth(display_name) + ellipsis_width <= available_width) {
+          display_name += "...";
+        } else {
+          display_name = truncateByPixel(display_name, available_width - ellipsis_width);
+          display_name += "...";
+        }
+      }
+    }
+    
+    // 绘制序号和名字
+    tft.setCursor(list_left_edge, y - 7);
+    tft.print(prefix + display_name);
+    
+    // 绘制数量
+    tft.setTextColor(TFT_LIGHTGREY);
+    tft.setCursor(text_end_x, y - 7);
+    tft.print(count);
+  }
+}
+
+// =============================================================================
+// 绘制列表选择界面
+// 参数: groups - 列表组数据
+//       selected_idx - 当前选中的索引
+//       title - 界面标题（"选择歌手"或"选择专辑"）
+void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_idx, const char* title)
+{
+  if (groups.empty()) return;
+
+  ui_lock();
+
+  // 计算显示范围（最多显示5项）
+  const int ITEMS_VISIBLE = 5;
+  const int ITEM_HEIGHT = 18;
+  const int START_Y = 60;
+  const int SCROLL_GAP = 20;
+
+  int total = (int)groups.size();
+  int start_idx = 0;
+
+  // 检测是否是新进入列表选择模式（选中项发生大跳变）
+  // 使用 ITEMS_VISIBLE 来判断是否是翻页操作
+  bool is_jump = (s_last_selected_idx == -1 || abs(selected_idx - s_last_selected_idx) >= ITEMS_VISIBLE);
+
+  if (is_jump) {
+    s_first_draw = true;
+  }
+
+  // 检查选中项是否改变，改变则重置滚动偏移
+  if (selected_idx != s_scroll_state.scroll_idx) {
+    s_scroll_state.reset(selected_idx);
+  }
+
+  // 【关键修改 1】：在所有绘制开始前，先处理滚动计时和偏移更新
+  bool is_offset_changed = false;
+  if (selected_idx == s_scroll_state.scroll_idx) {
+    if (s_scroll_state.shouldUpdate()) {
+      // 计算当前选中项是否真的需要滚动
+      String prefix = String(selected_idx + 1) + ". ";
+      int prefix_width = tft.textWidth(prefix);
+      String count = "(" + String(groups[selected_idx].track_indices.size()) + "首)";
+      int count_width = tft.textWidth(count);
+      int available_width = 200 - 25 - prefix_width - count_width - 10;
+      int full_width = tft.textWidth(groups[selected_idx].name);
+      
+      // 计算字符数量
+      int char_count = 0;
+      int byte_pos = 0;
+      String name = groups[selected_idx].name;
+      while (byte_pos < name.length()) {
+        unsigned char c = name.charAt(byte_pos);
+        if ((c & 0x80) == 0) {
+          byte_pos++;  // ASCII字符，1字节
+        } else if ((c & 0xE0) == 0xC0) {
+          byte_pos += 2;  // 2字节UTF-8字符
+        } else if ((c & 0xF0) == 0xE0) {
+          byte_pos += 3;  // 3字节UTF-8字符（中文）
+        } else if ((c & 0xF8) == 0xF0) {
+          byte_pos += 4;  // 4字节UTF-8字符
+        } else {
+          byte_pos++;
+        }
+        char_count++;
+      }
+      
+      // 更新偏移量
+      is_offset_changed = s_scroll_state.update(name, full_width, available_width);
+    }
+  }
+  
+  // 防止频繁重绘检查（非滚动更新时）
+  if (!s_first_draw && selected_idx == last_drawn_selected && 
+      s_scroll_state.scroll_offset == last_drawn_offset && !is_offset_changed) {
+    // 无变化，直接返回
+    ui_unlock();
+    return;
+  }
+
+  // --- 索引计算核心（硬分页逻辑）---
+
+  // 1. 计算当前选中项所在的页码 (每页 ITEMS_VISIBLE 个)
+  int current_page = selected_idx / ITEMS_VISIBLE;
+
+  // 2. 这一页的起始索引就是固定的
+  start_idx = current_page * ITEMS_VISIBLE;
+
+  // 3. 这里的 end_idx 逻辑保持不变，它会自动处理最后一页不足 5 个的情况
+  int end_idx = start_idx + ITEMS_VISIBLE;
+  if (end_idx > total) end_idx = total;
+
+  // 4. 判定是否需要全屏重绘
+  // 只要起始索引变了（翻页了），就必须全刷
+  bool need_scroll = (start_idx != s_last_start_idx);
+
+  // 【关键修改 2】：判断重绘条件
+  if (s_first_draw) {
+    // 首次绘制，强制全屏重绘
+    tft.fillScreen(TFT_BLACK);
+
+    // 绘制列表框架
+    drawListFrame(title, start_idx, total, ITEMS_VISIBLE);
+
+    // 绘制所有列表项
+    for (int i = start_idx; i < end_idx; i++) {
+      int list_pos = i - start_idx;  // 列表中的位置（0-4）
+      bool is_selected = (i == selected_idx);
+      
+      // 使用辅助函数绘制列表项，选中项使用当前滚动偏移
+      drawListItem(groups[i], i, list_pos, is_selected, 
+                   is_selected ? s_scroll_state.scroll_offset : 0);
+    }
+    
+    s_first_draw = false; // 绘制完后再设为 false
+  } else if (need_scroll) {
+    // 滚动页面切换，完全重绘
+    tft.fillScreen(TFT_BLACK);
+
+    // 绘制列表框架
+    drawListFrame(title, start_idx, total, ITEMS_VISIBLE);
+
+    // 绘制所有列表项
+    for (int i = start_idx; i < end_idx; i++) {
+      int list_pos = i - start_idx;  // 列表中的位置（0-4）
+      bool is_selected = (i == selected_idx);
+      
+      // 使用辅助函数绘制列表项，选中项使用当前滚动偏移
+      drawListItem(groups[i], i, list_pos, is_selected, 
+                   is_selected ? s_scroll_state.scroll_offset : 0);
+    }
+  } else if (selected_idx != s_last_selected_idx) {
+    // 跨行切换逻辑（清除旧高亮，画新高亮）
+    // 只更新变化的两行（旧的选中项和新的选中项）
+    if (s_last_selected_idx >= 0 && s_last_selected_idx < total && s_last_selected_idx != selected_idx) {
+      int old_list_pos = s_last_selected_idx - start_idx;
+      if (s_last_selected_idx >= start_idx && s_last_selected_idx < end_idx) {
+        // 清除旧的高亮背景
+        int old_y = START_Y + old_list_pos * ITEM_HEIGHT;
+        tft.fillRoundRect(15, old_y - ITEM_HEIGHT / 2, 200, ITEM_HEIGHT, 5, TFT_BLACK);
+        
+        // 重新绘制旧的选中项（非选中状态）
+        drawListItem(groups[s_last_selected_idx], s_last_selected_idx, old_list_pos, false, 0, false);
+      }
+    }
+
+    // 绘制新的高亮行（选中状态）
+    int new_list_pos = selected_idx - start_idx;
+    drawListItem(groups[selected_idx], selected_idx, new_list_pos, true, 
+                 s_scroll_state.scroll_offset, true);
+  } else if (is_offset_changed) {
+    // 【核心】：仅更新选中项的文字部分实现滚动
+    int new_list_pos = selected_idx - start_idx;
+    // 直接调用 drawListItem，此时 scroll_offset 已经递增过了
+    drawListItem(groups[selected_idx], selected_idx, new_list_pos, true, s_scroll_state.scroll_offset, true);
+  }
+
+  // 更新状态
+  s_last_selected_idx = selected_idx;
+  s_last_start_idx = start_idx;
+  last_drawn_selected = selected_idx;
+  last_drawn_offset = s_scroll_state.scroll_offset;
+  s_first_draw = false;
+
+  ui_unlock();
+}
+
+// 清除列表选择界面
+void ui_clear_list_select()
+{
+  ui_lock();
+  tft.fillScreen(TFT_BLACK);
+  
+  // 必须重置这些静态变量，否则下次进入会误以为是"局部更新"
+  s_first_draw = true;
+  s_last_selected_idx = -1;
+  s_last_start_idx = -1;
+  last_drawn_selected = -1;
+  last_drawn_offset = -1;
+  s_scroll_state.reset(-1); // 重置滚动状态
+  
+  ui_unlock();
 }
