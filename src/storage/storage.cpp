@@ -35,7 +35,23 @@ bool storage_init(void)
     
     // 用独立 SPI_SD 初始化 SdFat
     // DEDICATED_SPI：SdFat 会更积极地管理 SPI（更稳）
-    SdSpiConfig cfg(PIN_SD_CS, DEDICATED_SPI, SD_SCK_MHZ(16), &SPI_SD);
+    // 提高时钟频率至 24MHz 以提升性能，特别是在解析 FLAC 封面图时
+    SdSpiConfig cfg(PIN_SD_CS, DEDICATED_SPI, SD_SCK_MHZ(24), &SPI_SD);
+
+    // 检查是否已经挂载，如果是则先卸载
+    if (storage_ready) {
+        Serial.println("[STORAGE] 检测到已有挂载，尝试重新挂载");
+        sd.end();
+        storage_ready = false;
+    }
+
+    // 检查卡的错误状态
+    if (sd.card()) {
+        uint8_t err = sd.card()->errorCode();
+        if (err != 0) {
+            Serial.printf("[STORAGE] 卡错误代码: %d\n", err);
+        }
+    }
 
     if (!sd.begin(cfg)) {
         Serial.println("[STORAGE] SdFat mount FAILED");
@@ -61,9 +77,16 @@ void storage_list_root(void)
 {
     if (!storage_ready) return;
 
+    // 获取 SD 卡访问互斥锁
+    if (xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("[STORAGE] 无法获取 SD 互斥锁");
+        return;
+    }
+
     SdFile root;
     if (!root.open("/")) {
         Serial.println("[STORAGE] open / FAILED");
+        xSemaphoreGive(g_sd_mutex);
         return;
     }
 
@@ -81,4 +104,7 @@ void storage_list_root(void)
         f.close();
     }
     root.close();
+
+    // 释放 SD 卡访问互斥锁
+    xSemaphoreGive(g_sd_mutex);
 }

@@ -3,6 +3,7 @@
 #include "driver/i2s.h"
 #include <freertos/FreeRTOS.h>
 #include "utils/log.h"
+#include "audio/audio_service.h"
 #include <string.h>
 #include "audio/audio.h"
 #include <freertos/semphr.h>
@@ -190,4 +191,11 @@ bool audio_i2s_set_sample_rate(int sample_rate)
         portEXIT_CRITICAL(&s_pos_mux);
     }
     return err == ESP_OK;
+}
+
+// 清空 DMA 缓冲区，消除暂停时的底噪
+void audio_i2s_zero_dma_buffer()
+{
+    if (!g_inited) return;
+    i2s_zero_dma_buffer(I2S_PORT);
 }

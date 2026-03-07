@@ -61,16 +61,34 @@ static bool skip_description(File32& f, uint8_t enc, uint32_t remain, uint32_t& 
   return true;
 }
 
+extern SemaphoreHandle_t g_sd_mutex;
+
 bool id3_find_apic(SdFat& sd, const char* path, Mp3CoverLoc& out)
 {
   out = {};
 
+  // 获取 SD 卡访问互斥锁
+  if (xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    return false;
+  }
+
   File32 f = sd.open(path, O_RDONLY);
-  if (!f) return false;
+  if (!f) {
+    xSemaphoreGive(g_sd_mutex);
+    return false;
+  }
 
   uint8_t hdr[10];
-  if (!read_exact(f, hdr, 10)) { f.close(); return false; }
-  if (!(hdr[0]=='I' && hdr[1]=='D' && hdr[2]=='3')) { f.close(); return true; }
+  if (!read_exact(f, hdr, 10)) { 
+    f.close(); 
+    xSemaphoreGive(g_sd_mutex);
+    return false;
+  }
+  if (!(hdr[0]=='I' && hdr[1]=='D' && hdr[2]=='3')) { 
+    f.close(); 
+    xSemaphoreGive(g_sd_mutex);
+    return true;
+  }
 
   uint8_t ver = hdr[3]; // 3 or 4
   uint8_t flags = hdr[5];
@@ -83,7 +101,9 @@ bool id3_find_apic(SdFat& sd, const char* path, Mp3CoverLoc& out)
     uint8_t ex[4];
     if (read_exact(f, ex, 4)) {
       uint32_t exsz = (ver == 4) ? read_syncsafe_u32(ex) : read_u32_be(ex);
-      pos += 4 + exsz;
+      // ID3v2.3: exsz 包含 4 字节长度描述本身
+      // ID3v2.4: exsz 不包含长度描述字节
+      pos += (ver == 4) ? (4 + exsz) : exsz;
       f.seekSet(pos);
     }
   }
@@ -108,6 +128,19 @@ bool id3_find_apic(SdFat& sd, const char* path, Mp3CoverLoc& out)
       continue;
     }
 
+    // 检查帧标志位，跳过压缩或加密的 APIC 帧
+    uint8_t flag1 = fh[8];
+    uint8_t flag2 = fh[9];
+    if (ver == 4) {
+      // ID3v2.4: 检查压缩和加密标志
+      if ((flag1 & 0x40) || (flag1 & 0x08)) {
+        // 压缩或加密的帧，跳过
+        skip_bytes(f, fsz);
+        pos += fsz;
+        continue;
+      }
+    }
+
     // ---- 解析 APIC 帧内部 ----
     uint32_t frame_start = pos; // 帧内容起点（不含10字节帧头）
     uint8_t enc = 0;
@@ -126,8 +159,8 @@ bool id3_find_apic(SdFat& sd, const char* path, Mp3CoverLoc& out)
     // description（跳过）
     if (!skip_description(f, enc, remain - consumed, consumed)) break;
 
-    // image data 起点：文件偏移 = frame_start + consumed
-    uint32_t img_off = frame_start + consumed;
+    // image data 起点：直接使用当前文件指针位置
+    uint32_t img_off = (uint32_t)f.position();
     uint32_t img_sz  = (fsz > consumed) ? (fsz - consumed) : 0;
 
     out.found = (img_sz > 0);
@@ -136,9 +169,13 @@ bool id3_find_apic(SdFat& sd, const char* path, Mp3CoverLoc& out)
     out.mime = mime.length() ? mime : String();
 
     f.close();
+    // 释放 SD 卡访问互斥锁
+    xSemaphoreGive(g_sd_mutex);
     return true;
   }
 
   f.close();
+  // 释放 SD 卡访问互斥锁
+  xSemaphoreGive(g_sd_mutex);
   return true;
 }

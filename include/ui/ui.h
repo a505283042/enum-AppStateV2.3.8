@@ -55,6 +55,7 @@ void ui_show_scanning();
 void ui_scan_begin();
 void ui_scan_tick(int tracks_count);
 void ui_scan_end();
+void ui_scan_abort();  // 扫描中断提示
 void ui_clear_screen();
 
 // ===== 播放器视图切换 =====

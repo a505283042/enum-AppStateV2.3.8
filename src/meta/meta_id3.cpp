@@ -105,16 +105,27 @@ static bool read_id3v1(File32& f, Id3BasicInfo& out) {
   return true;
 }
 
+extern SemaphoreHandle_t g_sd_mutex;
+
 bool id3_read_basic(SdFat& sd, const char* path, Id3BasicInfo& out)
 {
   out = {};
 
+  // 获取 SD 卡访问互斥锁
+  if (xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    return false;
+  }
+
   File32 f = sd.open(path, O_RDONLY);
-  if (!f) return false;
+  if (!f) {
+    xSemaphoreGive(g_sd_mutex);
+    return false;
+  }
 
   uint8_t hdr[10];
   if (f.read(hdr, 10) != 10) {
     f.close();
+    xSemaphoreGive(g_sd_mutex);
     return false;
   }
 
@@ -131,7 +142,9 @@ bool id3_read_basic(SdFat& sd, const char* path, Id3BasicInfo& out)
       uint8_t ex[4];
       if (f.read(ex, 4) == 4) {
         uint32_t exsz = (ver == 4) ? read_syncsafe_u32(ex) : read_u32_be(ex);
-        pos += 4 + exsz;
+        // ID3v2.3: exsz 包含 4 字节长度描述本身
+        // ID3v2.4: exsz 不包含长度描述字节
+        pos += (ver == 4) ? (4 + exsz) : exsz;
         f.seekSet(pos);
       }
     }
@@ -183,11 +196,15 @@ bool id3_read_basic(SdFat& sd, const char* path, Id3BasicInfo& out)
     // 兜底 ID3v1
     read_id3v1(f, out);
     f.close();
+    // 释放 SD 卡访问互斥锁
+    xSemaphoreGive(g_sd_mutex);
     return true;
   }
 
   // 没有 ID3v2：尝试 ID3v1
   read_id3v1(f, out);
   f.close();
+  // 释放 SD 卡访问互斥锁
+  xSemaphoreGive(g_sd_mutex);
   return true;
 }

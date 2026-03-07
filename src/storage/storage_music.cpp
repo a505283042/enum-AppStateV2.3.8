@@ -5,11 +5,13 @@
 #include "utils/log.h"
 #include <vector>
 #include <map>
+#include <set>
 #include "meta/meta_id3.h"
 #include "meta/meta_flac.h"
 #include "meta/meta_id3_cover.h"
 #include "meta/meta_flac_cover.h"
 #include "ui/ui.h"
+#include "app_flags.h"
 
 
 using namespace std;
@@ -126,6 +128,21 @@ static void scan_album_folder(const String& music_root,
   int file_count = 0;
   int mp3_count = 0;
 
+  // ✅ 性能优化：先收集所有文件名到内存中，避免频繁调用 file_exists
+  std::set<String> file_names;
+  album_dir->rewind();
+  SdFile temp_f;
+  while (temp_f.openNext(album_dir, O_RDONLY)) {
+    if (!temp_f.isDir()) {
+      char name[128];
+      temp_f.getName(name, sizeof(name));
+      String fn(name);
+      fn.toLowerCase(); // 转小写便于匹配
+      file_names.insert(fn);
+    }
+    temp_f.close();
+  }
+
   // 重置目录指针到开始位置，以便从头开始遍历
   album_dir->rewind();
   
@@ -151,8 +168,11 @@ static void scan_album_folder(const String& music_root,
       t.ext = (dot >= 0) ? fn.substring(dot) : "";
       t.ext.toLowerCase();
 
-      String lrc = album_path + "/" + t.title + ".lrc";
-      t.lrc_path = file_exists(lrc) ? lrc : String();
+      // ✅ 性能优化：直接在内存中查找歌词文件，避免 SD 卡 Open/Close
+      String title_lower = t.title;
+      title_lower.toLowerCase();
+      String lrc_name = title_lower + ".lrc";
+      t.lrc_path = file_names.count(lrc_name) ? (album_path + "/" + t.title + ".lrc") : String();
 
       // 封面信息处理（P2-3：封面最小策略）
       // 先默认无封面
@@ -224,6 +244,10 @@ bool storage_scan_music(std::vector<TrackInfo>& out_tracks,
                         std::vector<AlbumInfo>& out_albums,
                         const char* music_root)
 {
+  g_abort_scan = false; // 开始前重置标志位
+  ui_scan_begin();
+  int scanned = 0;
+
   out_tracks.clear();
   out_albums.clear();
 
@@ -233,6 +257,7 @@ bool storage_scan_music(std::vector<TrackInfo>& out_tracks,
   if (!root.open(music_root, O_RDONLY) || !root.isDir()) {
     LOGE("[SCAN] Failed to open music root: %s", music_root);
     root.close();
+    ui_scan_end();
     return false;
   }
 
@@ -268,6 +293,22 @@ bool storage_scan_music(std::vector<TrackInfo>& out_tracks,
       // 使用父目录句柄直接传递给 scan_album_folder
       scan_album_folder(music_root, artistName, albumName, &albumDir, out_tracks, out_albums);
 
+      // --- 核心检查点 ---
+      if (g_abort_scan) {
+        LOGI("[SCAN] Scan ABORTED by user");
+        albumDir.close();
+        artistDir.close();
+        root.close();
+        ui_scan_abort(); // 显示"已取消"提示
+        return false;
+      }
+
+      scanned++;
+      ui_scan_tick(scanned);
+
+      // 让出 CPU，防止 WDT
+      delay(0);
+
       albumDir.close();
     }
 
@@ -277,6 +318,8 @@ bool storage_scan_music(std::vector<TrackInfo>& out_tracks,
   root.close();
   s_tracks = out_tracks;
   s_albums = out_albums;
+
+  ui_scan_end();
 
   LOGI("[SCAN] Scan complete: %d artists, %d albums, %d tracks", 
                 artist_count, album_count, (int)out_tracks.size());
@@ -288,6 +331,7 @@ bool storage_scan_music_flat(std::vector<TrackInfo>& out_tracks,
                              std::vector<AlbumInfo>& out_albums,
                              const char* music_root)
 {
+  g_abort_scan = false; // 开始前重置标志位
   ui_scan_begin();
   int scanned = 0;
 
@@ -312,6 +356,13 @@ bool storage_scan_music_flat(std::vector<TrackInfo>& out_tracks,
 
   SdFile f;
   while (f.openNext(&root, O_RDONLY)) {
+    // --- 核心检查点 ---
+    if (g_abort_scan) {
+      LOGI("[SCAN] Scan ABORTED by user");
+      f.close();
+      break; // 跳出循环
+    }
+
     if (f.isDir()) { f.close(); continue; }
 
     char name[256];
@@ -392,6 +443,12 @@ bool storage_scan_music_flat(std::vector<TrackInfo>& out_tracks,
 
   root.close();
 
+  // 如果是中断的，我们可能不想覆盖旧的索引，或者想清空
+  if (g_abort_scan) {
+    ui_scan_abort(); // 显示"已取消"提示
+    return false;
+  }
+
   // 更新全局缓存
   s_tracks = out_tracks;
   s_albums = out_albums;
@@ -451,7 +508,7 @@ bool storage_save_index(const char* index_path)
 
   // header
   const uint32_t magic = 0x4D494458; // 'MIDX'
-  const uint16_t ver = 1;
+  const uint16_t ver = 1; // ⚠️ 重要：每次修改 TrackInfo 存储字段时，务必递增此版本号
   write_u32(f, magic);
   write_u16(f, ver);
   write_u32(f, (uint32_t)s_tracks.size());
@@ -485,10 +542,15 @@ bool storage_load_index(const char* index_path)
 
   uint32_t magic=0; uint16_t ver=0; uint32_t cnt=0;
   if (!read_u32(f, magic) || !read_u16(f, ver) || !read_u32(f, cnt)) { f.close(); return false; }
-  if (magic != 0x4D494458 || ver != 1 || cnt > 5000) { f.close(); return false; }
+  
+  // ⚠️ 版本检查：如果版本不匹配，说明索引文件格式已过时，需要重新扫描
+  if (magic != 0x4D494458 || ver != 1 || cnt > 5000) { 
+    f.close(); 
+    return false; 
+  }
 
   std::vector<TrackInfo> tracks;
-  tracks.reserve(cnt);
+  tracks.reserve(cnt); // ✅ 预分配内存，防止读取大量歌曲时堆内存碎片化
 
   for (uint32_t i=0;i<cnt;i++) {
     TrackInfo t;
@@ -531,9 +593,13 @@ bool storage_rescan_flat(const char* music_root, const char* index_path)
   std::vector<TrackInfo> t;
   std::vector<AlbumInfo> a;
   if (!storage_scan_music_flat(t, a, music_root)) {
-    LOGE("[STORAGE] Scan failed: no music files found in %s", music_root);
-    // 扫描失败时，清空现有列表
-    s_tracks.clear();
+    if (g_abort_scan) {
+      LOGI("[STORAGE] Scan aborted by user, keeping existing tracks");
+    } else {
+      LOGE("[STORAGE] Scan failed: no music files found in %s", music_root);
+      // 扫描失败时，清空现有列表
+      s_tracks.clear();
+    }
     return false;
   }
   LOGI("[STORAGE] Scan completed: %d tracks found", (int)t.size());

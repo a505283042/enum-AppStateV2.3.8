@@ -4,6 +4,7 @@
 #include "ui/ui_colors.h"
 #include "ui/ui.h"
 #include "ui/ui_icon_images.h"
+#include "audio/audio_service.h"
 
 // 外部声明全局变量
 extern lgfx::U8g2font g_font_cjk;
@@ -18,6 +19,10 @@ static int s_album_scroll_x = 0;
 static uint32_t s_album_scroll_last_ms = 0;
 static constexpr int ALBUM_SCROLL_SPEED = 1;    // 滚动速度（像素/帧）
 static constexpr int ALBUM_SCROLL_GAP = 20;     // 副本间距（像素）
+
+// 专辑名宽度缓存
+static String s_last_album_name = "";
+static int s_last_album_width = 0;
 
 // 播放模式切换高亮状态
 extern volatile uint32_t s_ui_mode_switch_time;
@@ -47,10 +52,7 @@ void draw_time_bar(LGFX_Sprite* dst,
   
   if (total_ms >= 1000 && total_ms != 0xFFFFFFFFu) {
     uint32_t clamped = el_ms > total_ms ? total_ms : el_ms;
-    float ratio = (float)clamped / (float)total_ms;
-    if (ratio < 0.0f) ratio = 0.0f;
-    if (ratio > 1.0f) ratio = 1.0f;
-    dot = (int)(ratio * (float)(bar_w - 2));
+    dot = (uint64_t)clamped * (bar_w - 2) / total_ms;
   } else {
     dot = (int)((el_ms / 1000) % 60) * (bar_w - 2) / 60;
   }
@@ -67,7 +69,21 @@ void draw_time_bar(LGFX_Sprite* dst,
   // 画光标头（2像素宽）
   const uint16_t c_cursor = UI_COLOR_BAR_CURSOR;  // 活力紫红
   int cursor_x = bar_x + 1 + dot;
-  dst->fillRect(cursor_x, y_bar, 2, bar_h, c_cursor);
+
+  // ===== 修改开始：增加闪烁逻辑 =====
+  bool show_cursor = true;
+  if (audio_service_is_paused()) {
+    // 每 500ms 切换一次状态 (1秒一个周期)
+    // 暂停时，光标会在显示 500ms 和 消失 500ms 之间循环
+    if ((millis() / 500) % 2 == 0) {
+      show_cursor = false;
+    }
+  }
+
+  if (show_cursor) {
+    dst->fillRect(cursor_x, y_bar, 2, bar_h, c_cursor);
+  }
+  // ===== 修改结束 =====
 
   // 时间文本
   char el[6];
@@ -87,7 +103,13 @@ void draw_time_bar(LGFX_Sprite* dst,
     String s(el);
 
     // 无描边
-    dst->setTextColor(c_text);
+    // 如果暂停且处于闪烁的"隐藏"周期，就把文字颜色设为和背景一样（或者变暗）
+    uint16_t current_text_color = c_text;
+    if (audio_service_is_paused() && ((millis() / 500) % 2 == 0)) {
+        current_text_color = c_bar_bg; // 变暗，或者直接用背景色隐藏
+    }
+
+    dst->setTextColor(current_text_color);
     dst->setCursor(x, y_time);
     dst->print(s);
   }
@@ -244,9 +266,21 @@ void draw_status_row(LGFX_Sprite* dst,
   // 计算专辑名文本最大可用宽度（减去图标和间距）
   int max_text_width = available_width - ALBUM_ICON_W - ALBUM_ICON_GAP;
 
-  // 计算专辑名实际宽度
+  // 计算专辑名实际宽度（使用缓存优化）
   dst->setTextWrap(false);  // 禁止自动换行
-  int twM = dst->textWidth(midS.c_str());
+  int twM = 0;
+  
+  // 检查专辑名是否变化，只有变化时才重新计算宽度
+  if (midS != s_last_album_name) {
+    twM = dst->textWidth(midS.c_str());
+    // 更新缓存
+    s_last_album_name = midS;
+    s_last_album_width = twM;
+  } else {
+    // 使用缓存的宽度
+    twM = s_last_album_width;
+  }
+  
   bool need_scroll = (twM > max_text_width);
 
   // 居中显示位置（图标+文字整体居中）
@@ -289,8 +323,9 @@ void draw_status_row(LGFX_Sprite* dst,
     // 主文本位置（像素滚动）
     int x1 = text_start_x - s_album_scroll_x;
 
-    // 设置裁剪区域
-    dst->setClipRect(text_start_x, 0, max_text_width, dst->height());
+    // 设置裁剪区域（限制在当前行高度内，防止遮挡上下元素）
+    const int line_height = 18;  // 14像素字体的合适行高
+    dst->setClipRect(text_start_x, y - 4, max_text_width, line_height);
 
     // 绘制主文本
     dst->setCursor(x1, y);
@@ -309,4 +344,7 @@ void draw_status_row(LGFX_Sprite* dst,
 void reset_album_scroll() {
   s_album_scroll_x = 0;
   s_album_scroll_last_ms = 0;
+  // 重置专辑名缓存，确保下次重新计算宽度
+  s_last_album_name = "";
+  s_last_album_width = 0;
 }

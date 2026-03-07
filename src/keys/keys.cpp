@@ -7,6 +7,7 @@
 #include "ui/ui.h"
 #include "audio/audio_service.h"
 #include "player_state.h"
+#include "utils/log.h"
 
 // 你项目里这些函数/接口要能被调用
 void player_next_track();
@@ -38,8 +39,18 @@ static void start_rescan()
   if (g_rescanning) return;
 
   g_rescanning = true;
+  
+  // ✅ 安全操作：确保音频服务完全停止后再开始扫描
+  // audio_service_stop(true) 只等待音频任务确认收到停止命令
+  // 但音频任务可能还需要时间释放文件句柄和 SD 卡互斥锁
+  // 因此需要等待 audio_service_is_playing() 返回 false
   audio_service_stop(true);
-  delay(10);
+  
+  // 等待音频任务完全停止，最多等待 1 秒
+  uint32_t start = millis();
+  while (audio_service_is_playing() && (millis() - start) < 1000) {
+    delay(10);
+  }
 
   ui_scan_begin();
 
@@ -80,12 +91,24 @@ static void handle_key(KeyCtx& k,
   }
 
   // 按住连发（音量）
+  // ✅ 渐进式连发：按住时间越长，音量变动越快
   if (repeat && pressed(k.last) && on_repeat) {
-    if (now - k.t_repeat >= 150) {
+    uint32_t hold_time = now - k.t_down;
+    uint32_t repeat_interval = 150; // 默认 150ms 间隔
+    
+    // 按住超过 2 秒后加速到 50ms 间隔
+    if (hold_time > 2000) {
+      repeat_interval = 50;
+    }
+    
+    if (now - k.t_repeat >= repeat_interval) {
       k.t_repeat = now;
       on_repeat();
     }
   }
+
+  // ✅ 防止长时间按键扫描逻辑阻塞系统
+  yield();
 }
 
 void keys_init()
@@ -98,8 +121,52 @@ void keys_init()
   pinMode(PIN_KEY_VOLUP, INPUT_PULLUP);
 }
 
+void keys_reset_all()
+{
+  k_mode.last = HIGH;
+  k_mode.long_fired = false;
+  k_mode.t_down = 0;
+  k_mode.t_repeat = 0;
+
+  k_play.last = HIGH;
+  k_play.long_fired = false;
+  k_play.t_down = 0;
+  k_play.t_repeat = 0;
+
+  k_prev.last = HIGH;
+  k_prev.long_fired = false;
+  k_prev.t_down = 0;
+  k_prev.t_repeat = 0;
+
+  k_next.last = HIGH;
+  k_next.long_fired = false;
+  k_next.t_down = 0;
+  k_next.t_repeat = 0;
+
+  k_voldn.last = HIGH;
+  k_voldn.long_fired = false;
+  k_voldn.t_down = 0;
+  k_voldn.t_repeat = 0;
+
+  k_volup.last = HIGH;
+  k_volup.long_fired = false;
+  k_volup.t_down = 0;
+  k_volup.t_repeat = 0;
+}
+
 void keys_update()
 {
+  // --- 新增：扫描状态下的紧急处理 ---
+  if (g_rescanning) {
+    // 在扫描时，我们只关心 MODE 键是否被按下以取消
+    int s = digitalRead(k_mode.pin);
+    if (s == LOW) { // 只要按下 MODE
+      g_abort_scan = true;
+      LOGI("[KEYS] Abort signal sent!");
+    }
+    return; // 扫描时屏蔽其他按键逻辑
+  }
+
   // 检查是否处于列表选择模式
   if (player_is_in_list_select_mode()) {
     // 列表选择模式下的按键处理

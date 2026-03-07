@@ -10,3 +10,11 @@ bool audio_service_stop(bool wait);
 
 // 播放状态（由 AudioTask 维护）
 bool audio_service_is_playing(void);
+
+// 暂停控制接口
+void audio_service_pause(void);
+void audio_service_resume(void);
+bool audio_service_is_paused(void);
+
+// 淡入淡出控制
+float audio_service_get_fade_gain(void);

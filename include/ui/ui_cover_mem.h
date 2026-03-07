@@ -3,6 +3,10 @@
 #include <SdFat.h>
 #include "storage/storage_music.h"
 
+// 初始化封面缓冲区（固定大小，避免 PSRAM 碎片）
+// 在系统启动时调用一次，分配 400KB 缓冲区
+bool cover_init_buffer(void);
+
 // 把封面读到内存（buf 由内部静态缓冲提供）
 // out_ptr 指向内部缓冲，下一次调用会覆盖
 bool cover_load_to_memory(SdFat& sd, const TrackInfo& t, const uint8_t*& out_ptr, size_t& out_len, bool& out_is_png);

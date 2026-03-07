@@ -8,6 +8,7 @@
 
 volatile bool g_rescan_done = false;
 volatile bool g_rescanning = false;
+volatile bool g_abort_scan = false; // 扫描中断标志
 volatile bool g_random_play = false;
 volatile play_mode_t g_play_mode = PLAY_MODE_ALL_SEQ;  // 播放模式
 

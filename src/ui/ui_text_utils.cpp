@@ -27,8 +27,12 @@ static int get_char_width(LGFX_Sprite* dst, const String& text, int byte_pos)
   if (byte_pos >= (int)text.length()) return 0;
   
   int char_len = utf8_char_len((uint8_t)text[byte_pos]);
-  String ch = text.substring(byte_pos, byte_pos + char_len);
-  return dst->textWidth(ch.c_str());
+  // 使用临时缓冲区，避免创建 String 对象
+  char temp_buf[5] = {0}; // UTF-8字符最多4字节
+  const char* p = text.c_str() + byte_pos;
+  memcpy(temp_buf, p, char_len);
+  temp_buf[char_len] = '\0';
+  return dst->textWidth(temp_buf);
 }
 
 // 计算从开头到指定字符位置的累计宽度
@@ -37,11 +41,15 @@ static int get_text_width_to_pos(LGFX_Sprite* dst, const String& text, int char_
   int width = 0;
   int byte_pos = 0;
   int current_char = 0;
+  const char* p = text.c_str();
+  char temp_buf[5] = {0}; // UTF-8字符最多4字节
   
   while (byte_pos < (int)text.length() && current_char < char_index) {
-    int char_len = utf8_char_len((uint8_t)text[byte_pos]);
-    String ch = text.substring(byte_pos, byte_pos + char_len);
-    width += dst->textWidth(ch.c_str());
+    int char_len = utf8_char_len((uint8_t)p[byte_pos]);
+    // 使用临时缓冲区，避免创建 String 对象
+    memcpy(temp_buf, p + byte_pos, char_len);
+    temp_buf[char_len] = '\0';
+    width += dst->textWidth(temp_buf);
     byte_pos += char_len;
     current_char++;
   }
@@ -59,65 +67,80 @@ void draw_center_text(const char* s, int y)
   tft.print(s);
 }
 
-void circle_span(int y, int pad, int& x0, int& w)
+// 查找表缓存：预计算所有 y 值对应的 (x0, w) 结果
+// 屏幕尺寸固定为 240x240，y 范围 0-239
+static bool s_circle_lut_init = false;
+static struct { int x0; int w; } s_circle_lut[240][10]; // [y][pad]
+
+void init_circle_lut()
 {
+  if (s_circle_lut_init) return;
+  
   const int cx = COVER_SIZE / 2;   // 120
   const int cy = COVER_SIZE / 2;   // 120
   const int r  = COVER_SIZE / 2;   // 120
+  
+  for (int y = 0; y < 240; y++) {
+    int dy = y - cy;
+    int ady = dy < 0 ? -dy : dy;
+    
+    if (ady >= r) {
+      for (int pad = 0; pad < 10; pad++) {
+        s_circle_lut[y][pad].x0 = cx;
+        s_circle_lut[y][pad].w = 0;
+      }
+      continue;
+    }
+    
+    float dx = sqrtf((float)(r * r - ady * ady));
+    
+    for (int pad = 0; pad < 10; pad++) {
+      int xmin = (int)ceilf(cx - dx) + pad;
+      int xmax = (int)floorf(cx + dx) - pad;
+      
+      if (xmax < xmin) {
+        s_circle_lut[y][pad].x0 = cx;
+        s_circle_lut[y][pad].w = 0;
+      } else {
+        s_circle_lut[y][pad].x0 = xmin;
+        s_circle_lut[y][pad].w = xmax - xmin + 1;
+      }
+    }
+  }
+  
+  s_circle_lut_init = true;
+}
 
-  int dy = y - cy;
-  int ady = dy < 0 ? -dy : dy;
-  if (ady >= r) { x0 = cx; w = 0; return; }
-
-  float dx = sqrtf((float)(r * r - ady * ady));
-  int xmin = (int)ceilf(cx - dx) + pad;
-  int xmax = (int)floorf(cx + dx) - pad;
-
-  if (xmax < xmin) { x0 = cx; w = 0; return; }
-  x0 = xmin;
-  w  = xmax - xmin + 1;
+void circle_span(int y, int pad, int& x0, int& w)
+{
+  // 确保查找表已初始化
+  init_circle_lut();
+  
+  // 边界检查
+  if (y < 0) y = 0;
+  if (y >= 240) y = 239;
+  if (pad < 0) pad = 0;
+  if (pad >= 10) pad = 9;
+  
+  // 直接从查找表获取结果，避免重复计算
+  x0 = s_circle_lut[y][pad].x0;
+  w = s_circle_lut[y][pad].w;
 }
 
 void fmt_mmss(uint32_t ms, char out[6])
 {
-  uint32_t total_sec = ms / 1000;
-  uint32_t min = total_sec / 60;
-  uint32_t sec = total_sec % 60;
-  if (min > 99) min = 99;
-  out[0] = '0' + (min / 10);
-  out[1] = '0' + (min % 10);
-  out[2] = ':';
-  out[3] = '0' + (sec / 10);
-  out[4] = '0' + (sec % 10);
-  out[5] = '\0';
+  uint32_t s = ms / 1000;
+  uint32_t m = s / 60;
+  s %= 60;
+  if (m > 99) { m = 99; s = 59; } // 封顶处理，显示 99:59
+  snprintf(out, 6, "%02u:%02u", (unsigned)m, (unsigned)s);
 }
 
 // 按像素宽度截断文本（末尾加 ...）
+// 重构：直接调用 clip_utf8_by_px 以减少代码重复
 String clip_text_px(LGFX_Sprite* dst, const String& s, int max_w)
 {
-  if (!dst) return s;
-  int full_w = dst->textWidth(s.c_str());
-  if (full_w <= max_w) return s;
-
-  const char* p = s.c_str();
-  String out;
-  int out_w = 0;
-  int dots_w = dst->textWidth("...");
-  int avail = max_w - dots_w;
-  if (avail < 10) avail = 10;
-
-  while (*p) {
-    int clen = utf8_char_len((uint8_t)*p);
-    String ch(p);
-    ch.remove(clen);
-    int cw = dst->textWidth(ch.c_str());
-    if (out_w + cw > avail) break;
-    out += ch;
-    out_w += cw;
-    p += clen;
-  }
-  out += "...";
-  return out;
+  return clip_utf8_by_px(dst, s, max_w);
 }
 
 // UTF-8 像素级文本截断：按最大像素宽度截断，正确处理UTF-8字符（末尾加 ...）

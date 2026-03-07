@@ -41,18 +41,33 @@ static void apply_kv(FlacBasicInfo& out, const String& key, const String& val) {
   // if (k == "ALBUMARTIST") ...
 }
 
+extern SemaphoreHandle_t g_sd_mutex;
+
 bool flac_read_vorbis_basic(SdFat& sd, const char* path, FlacBasicInfo& out)
 {
   out = {};
 
+  // 获取 SD 卡访问互斥锁
+  if (xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    return false;
+  }
+
   File32 f = sd.open(path, O_RDONLY);
-  if (!f) return false;
+  if (!f) {
+    xSemaphoreGive(g_sd_mutex);
+    return false;
+  }
 
   // 1) FLAC magic: "fLaC"
   uint8_t magic[4];
-  if (!read_exact(f, magic, 4)) { f.close(); return false; }
+  if (!read_exact(f, magic, 4)) { 
+    f.close(); 
+    xSemaphoreGive(g_sd_mutex);
+    return false;
+  }
   if (!(magic[0]=='f' && magic[1]=='L' && magic[2]=='a' && magic[3]=='C')) {
     f.close();
+    xSemaphoreGive(g_sd_mutex);
     return false;
   }
 
@@ -103,11 +118,16 @@ bool flac_read_vorbis_basic(SdFat& sd, const char* path, FlacBasicInfo& out)
         String line;
         line.reserve(to_read + 1);
 
-        // 读 to_read 字节
-        for (uint32_t j = 0; j < to_read; j++) {
-          int ch = f.read();
-          if (ch < 0) break;
-          line += (char)ch;
+        // 优化版：批量读取文本
+        if (to_read > 0) {
+            char* buf = (char*)malloc(to_read + 1);
+            if (buf) {
+                if (f.read(buf, to_read) == (int)to_read) {
+                    buf[to_read] = '\0';
+                    line = String(buf);
+                }
+                free(buf);
+            }
         }
         // 跳过剩余
         if (c_len > to_read) seek_skip(f, c_len - to_read);
@@ -145,6 +165,8 @@ bool flac_read_vorbis_basic(SdFat& sd, const char* path, FlacBasicInfo& out)
   }
 
   f.close();
+  // 释放 SD 卡访问互斥锁
+  xSemaphoreGive(g_sd_mutex);
   // 找到 FLAC 头并扫描完：返回 true；是否读到字段由 out.xxx 是否为空决定
   return found_vc;
 }

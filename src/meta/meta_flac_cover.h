@@ -4,8 +4,8 @@
 
 struct FlacCoverLoc {
   bool found = false;
-  uint32_t offset = 0;
-  uint32_t size = 0;
+  uint64_t offset = 0;
+  uint64_t size = 0;
   String mime;
 };
 

@@ -8,6 +8,7 @@
 #include "utils/log.h"
 #include "app_flags.h"
 #include "lyrics/lyrics.h"
+#include "keys/keys.h"
 
 static bool s_started = false;
 static int  s_cur = 0;
@@ -16,6 +17,11 @@ static int  s_cur = 0;
 
 // 用户主动暂停/停止时，不自动下一首
 static bool s_user_paused = false;
+
+// 暂停功能相关变量
+static bool s_is_paused = false;           // 当前是否处于暂停状态
+static uint32_t s_pause_time_ms = 0;       // 暂停时的时间戳（用于歌词同步）
+static uint32_t s_paused_at_ms = 0;        // 暂停时的播放位置
 
 // ✅ 当前封面缓存属于哪一首；-1 表示未知/需要重解码
 static int  s_cover_idx = -1;
@@ -191,7 +197,11 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
 
     const TrackInfo& t = tracks_list[s_cur];
 
+    // 切歌时重置暂停状态，确保新歌能够正常播放
     s_user_paused = false;
+    s_is_paused = false;
+    s_pause_time_ms = 0;
+    audio_service_resume();  // 确保音频服务的暂停标志被清空
 
     LOGI("[PLAYER] play #%d: %s", s_cur, t.audio_path.c_str());
     // ✅ 先冻结 UI，避免新文字画在旧封面上
@@ -273,13 +283,8 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
         g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
         std::vector<int> playlist = get_current_playlist();
         display_total = (int)playlist.size();
-        // 查找当前歌曲在组内的位置（1-based）
-        for (int i = 0; i < (int)playlist.size(); i++) {
-            if (playlist[i] == s_cur) {
-                display_pos = i;  // 0-based 索引
-                break;
-            }
-        }
+        // 显示歌曲的实际索引，而不是播放列表中的位置
+        display_pos = s_cur;
     }
     ui_set_track_pos(display_pos, display_total);
     ui_set_play_mode(g_play_mode);
@@ -312,6 +317,10 @@ void player_state_run(void)
              (int)storage_get_albums().size(),
              (int)tracks_list.size());
 
+        // 强制初始化播放列表缓存，确保切歌功能正常
+        s_last_play_mode = (play_mode_t)-1;  // 强制触发缓存更新
+        update_playlist_cache();
+
         if (!tracks_list.empty()) {
             player_play_idx(0, true, true);
         } else {
@@ -330,6 +339,11 @@ void player_state_run(void)
         if (!tl.empty()) {
             ui_enter_player();
             s_cover_idx = -1;                 // 强制封面重解码，避免闪旧封面/缓存不一致
+            
+            // 强制初始化播放列表缓存，确保切歌功能正常
+            s_last_play_mode = (play_mode_t)-1;  // 强制触发缓存更新
+            update_playlist_cache();
+            
             player_play_idx(0, true, true);
         } else {
             LOGI("[PLAYER] no tracks after rescan");
@@ -483,14 +497,40 @@ void player_toggle_play()
     if (tracks_list.empty()) return;
     if (g_rescanning) return;
 
-    if (audio_service_is_playing()) {
-        s_user_paused = true;
-        audio_service_stop(true);
+    // 使用新的暂停/恢复机制
+    if (audio_service_is_paused()) {
+        // 恢复播放
+        audio_service_resume();
+        s_is_paused = false;
+        s_user_paused = false;
+        
+        // 恢复歌词计时：计算暂停期间经过的时间，并调整暂停时间戳
+        uint32_t pause_duration = millis() - s_pause_time_ms;
+        s_pause_time_ms = 0;
+        // 注意：歌词显示使用 audio_get_play_ms() 获取时间，
+        // 由于音频服务暂停时音频时间也停止，所以不需要额外调整歌词时间
+        
+        LOGI("[PLAYER] Resumed from pause");
         return;
     }
 
+    if (audio_service_is_playing()) {
+        // 暂停播放（而不是停止）
+        audio_service_pause();
+        s_is_paused = true;
+        s_user_paused = true;
+        s_pause_time_ms = millis();
+        s_paused_at_ms = audio_get_play_ms();
+        
+        LOGI("[PLAYER] Paused at %u ms", s_paused_at_ms);
+        return;
+    }
+
+    // 如果既没有播放也没有暂停（停止状态），则开始播放
     // ✅ 恢复播放：尽量复用封面（同一首歌不再重解码）
+    s_is_paused = false;
     s_user_paused = false;
+    s_pause_time_ms = 0;
     player_play_idx(s_cur, false, false);
 }
 
@@ -510,6 +550,9 @@ void player_next_group()
 {
     const auto& tracks_list = storage_get_tracks();
     if (tracks_list.empty()) return;
+
+    // ✅ 重置所有按键状态，防止长按状态残留导致逻辑异常
+    keys_reset_all();
 
     if (g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND) {
         // 进入歌手列表选择模式
@@ -680,7 +723,8 @@ void player_toggle_random()
         if (!tracks_list.empty()) {
             const auto& playlist = get_current_playlist();
             int display_total = (int)playlist.size();
-            int display_pos = (s_current_playlist_pos >= 0) ? s_current_playlist_pos : 0;
+            // 显示歌曲的实际索引，而不是播放列表中的位置
+            int display_pos = s_cur;
             ui_set_track_pos(display_pos, display_total);
         }
     } else {

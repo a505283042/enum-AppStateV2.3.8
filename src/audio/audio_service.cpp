@@ -7,6 +7,7 @@
 
 #include "audio/audio_service.h"
 #include "audio/audio.h"
+#include "audio/audio_i2s.h"
 
 #ifndef AUDIO_TASK_CORE
 #define AUDIO_TASK_CORE 0   // Arduino loopTask 默认在 core1；把音频钉到 core0 更稳
@@ -37,6 +38,13 @@ static QueueHandle_t s_q = nullptr;
 static TaskHandle_t  s_task = nullptr;
 static volatile bool s_playing_cache = false;
 static volatile bool s_ready = false;
+static bool s_paused = false; // 内部暂停标志
+
+// 淡入淡出功能相关变量
+static float s_fade_gain = 1.0f; // 当前增益 (0.0 到 1.0)
+static float s_last_fade_gain = 1.0f; // 上一次的增益，用于检测淡出完成
+// 这里的速度决定了淡入淡出的快慢：10ms 左右比较合适
+#define FADE_STEP 0.05f
 
 static void audio_task_entry(void*)
 {
@@ -48,7 +56,7 @@ static void audio_task_entry(void*)
   s_ready = true;
 
   for (;;) {
-    // 1) 先处理队列里的控制命令
+    // 1) 先处理队列里的控制命令（保持不变，这样暂停时依然可以发 CMD_STOP 停止播放）
     AudioCmd cmd;
     while (s_q && xQueueReceive(s_q, &cmd, 0) == pdTRUE) {
       uint32_t ack = 1;
@@ -58,6 +66,8 @@ static void audio_task_entry(void*)
       } else if (cmd.type == CMD_PLAY) {
         bool ok = audio_play(cmd.path);
         ack = ok ? 1 : 0;
+        // 收到新歌 PLAY 命令，自动取消暂停
+        s_paused = false;
       }
 
       // 刷新播放状态缓存
@@ -68,19 +78,52 @@ static void audio_task_entry(void*)
       }
     }
 
-    // 2) 持续喂音频（播放时必须高频）
-    audio_loop();
+    // --- 核心：淡入淡出状态机 ---
+    if (s_paused) {
+      if (s_fade_gain > 0.0f) {
+        s_fade_gain -= FADE_STEP;
+        if (s_fade_gain < 0.0f) s_fade_gain = 0.0f;
+      }
+    } else {
+      if (s_fade_gain < 1.0f) {
+        s_fade_gain += FADE_STEP;
+        if (s_fade_gain > 1.0f) s_fade_gain = 1.0f;
+      }
+    }
 
-    // 3) 同步缓存：处理"自然播放结束"这种情况
+    // 检测淡出完成，清空 DMA 缓冲区消除底噪
+    if (s_last_fade_gain > 0.0f && s_fade_gain == 0.0f) {
+      audio_i2s_zero_dma_buffer();
+    }
+    s_last_fade_gain = s_fade_gain;
+
+    // 只有当增益大于 0，或者虽然暂停但还没淡出完成时，才跑循环
+    if (s_fade_gain > 0.0f) {
+      // 在这里你需要调用解码库提供的 setVolume 或直接对 PCM 数据乘以 s_fade_gain
+      // 如果你的音频库支持，可以这样：
+      // audio.setVolumeFactor(s_fade_gain);
+      audio_loop();
+    }
+
+    // 2) 同步缓存：处理"自然播放结束"这种情况
+    bool was_playing = s_playing_cache;
     s_playing_cache = audio_is_playing();
 
-    // 4) CPU 使用优化：
-    //    - 播放时：audio_loop 内部的 i2s_write 会阻塞，但仍需小延迟避免 100% 占用
-    //    - 空闲时：较长延迟节省 CPU
-    if (!s_playing_cache) {
-      vTaskDelay(2);  // 空闲时延迟 2ms
+    // 播放结束自动复位：如果一首歌自然播放完了（EOF），自动复位暂停状态
+    // 否则下一首歌可能会卡在暂停状态
+    if (was_playing && !s_playing_cache) {
+      s_paused = false;
+      s_fade_gain = 1.0f;
+      s_last_fade_gain = 1.0f;
+    }
+
+    // 3) 优化延迟：淡入淡出期间使用较短延迟
+    if (s_fade_gain > 0.0f && s_fade_gain < 1.0f) {
+      vTaskDelay(1);
+    } else if (!s_playing_cache || s_paused) {
+      vTaskDelay(10);
     } else {
-      vTaskDelay(1);  // 播放时延迟 1ms，确保其他任务有机会运行
+      vTaskDelay(1);
     }
   }
 }
@@ -151,3 +194,16 @@ bool audio_service_is_playing(void)
 {
   return s_playing_cache;
 }
+
+// 供外部调用的暂停控制接口
+void audio_service_pause() { 
+    s_paused = true; 
+    // 注意：不再立即调用 zero_dma_buffer，因为我们要留时间做淡出 
+}
+void audio_service_resume() { 
+    s_paused = false; 
+}
+bool audio_service_is_paused() { return s_paused; }
+
+// 获取当前淡入淡出增益
+float audio_service_get_fade_gain() { return s_fade_gain; }

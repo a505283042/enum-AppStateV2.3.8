@@ -9,6 +9,7 @@
 #include "audio/audio_i2s.h"
 #include "audio/audio_mp3.h"
 #include "audio/audio_flac.h"
+#include "audio/audio_service.h"
 #include "dr_flac.h"
 #include "utils/log.h"
 
@@ -379,7 +380,11 @@ uint8_t audio_get_volume(void)
 
 uint16_t audio_get_gain_q15(void)
 {
-  return s_gain_q15;
+  // 应用淡入淡出增益
+  float fade_gain = audio_service_get_fade_gain();
+  uint32_t gain = (uint32_t)(s_gain_q15 * fade_gain);
+  if (gain > 32768) gain = 32768;
+  return (uint16_t)gain;
 }
 
 // 新增函数实现

@@ -314,29 +314,35 @@ static bool cover_blit_scaled_to_240(const uint8_t* ptr, size_t len, bool is_png
   bool got = is_png ? png_get_wh(ptr, len, srcW, srcH) : jpg_get_wh(ptr, len, srcW, srcH);
   if (!got || srcW <= 0 || srcH <= 0) {
     // 拿不到尺寸就退回"裁剪模式"（直接绘制到 240x240）
+    ui_lock(); // 必须加锁，因为 UiTask 可能正在读取 s_coverSpr
     s_coverSpr.fillScreen(TFT_BLACK);
     bool ok = false;
     if (is_png) ok = s_coverSpr.drawPng(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
     else        ok = s_coverSpr.drawJpg(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
-    if (!ok) return false;
-    // 复制到遮罩精灵并添加遮罩
-    s_coverMasked.fillScreen(TFT_BLACK);
-    s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
-    s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
-    return true;
+    if (ok) {
+      // 复制到遮罩精灵并添加遮罩
+      s_coverMasked.fillScreen(TFT_BLACK);
+      s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
+      s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
+    }
+    ui_unlock();
+    return ok;
   }
 
   // 安全阈值：防止超大封面炸内存
   if (srcW > 800 || srcH > 800) {
+    ui_lock(); // 必须加锁，因为 UiTask 可能正在读取 s_coverSpr
     s_coverSpr.fillScreen(TFT_BLACK);
     bool ok = is_png ? s_coverSpr.drawPng(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE)
                      : s_coverSpr.drawJpg(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
-    if (!ok) return false;
-    // 复制到遮罩精灵并添加遮罩
-    s_coverMasked.fillScreen(TFT_BLACK);
-    s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
-    s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
-    return true;
+    if (ok) {
+      // 复制到遮罩精灵并添加遮罩
+      s_coverMasked.fillScreen(TFT_BLACK);
+      s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
+      s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
+    }
+    ui_unlock();
+    return ok;
   }
 
   // 1) 创建临时 sprite：解码原图（800x800 约 1.9MB，PSRAM 足够）
@@ -351,10 +357,17 @@ static bool cover_blit_scaled_to_240(const uint8_t* ptr, size_t len, bool is_png
     LOGW("[COVER] tmp.createSprite(%d,%d) failed -> fallback crop", srcW, srcH);
 
     // 创建失败就退回“直接画到 240x240”（能显示就行，别崩）
+    ui_lock(); // 必须加锁，因为 UiTask 可能正在读取 s_coverSpr
     s_coverSpr.fillScreen(TFT_BLACK);
     bool ok = is_png ? s_coverSpr.drawPng(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE)
                     : s_coverSpr.drawJpg(ptr, len, 0, 0, COVER_SIZE, COVER_SIZE);
-    if (ok) s_coverSpr.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
+    if (ok) {
+      // 复制到遮罩精灵并添加遮罩
+      s_coverMasked.fillScreen(TFT_BLACK);
+      s_coverSpr.pushSprite(&s_coverMasked, 0, 0);
+      s_coverMasked.fillRectAlpha(0, 0, COVER_SIZE, COVER_SIZE, 128, TFT_BLACK);
+    }
+    ui_unlock();
     return ok;
   }
 
@@ -512,6 +525,50 @@ static void cover_rotate_draw(float angle_deg)
   s_rotBack = tmp;
 }
 
+/**
+ * 基于时间的推移式滚动
+ * @param progress: 当前句播放进度 (0.0 到 1.0)
+ */
+static void draw_scrolling_line_by_time(LGFX_Sprite* dst, const char* text, int y, 
+                                       int safe_pad, uint16_t color, float progress)
+{
+  if (!text || strlen(text) == 0) return;
+
+  dst->setTextColor(color);
+  dst->setFont(&g_font_cjk);
+  int text_w = dst->textWidth(text);
+  int available_w = 240 - (safe_pad * 2);
+
+  if (text_w <= available_w) {
+    draw_center_text_on_sprite(dst, text, y, color, safe_pad);
+    return;
+  }
+
+  // 计算最大可滚动距离
+  int max_scroll = text_w - available_w;
+
+  // --- 核心逻辑：进度映射 ---
+  // 我们让进度在 10% 到 90% 的时间内进行滚动，前后留出时间让用户看清头尾
+  float scroll_factor = 0;
+  if (progress < 0.1f) {
+    scroll_factor = 0; // 头部静止
+  } else if (progress > 0.9f) {
+    scroll_factor = 1.0f; // 尾部静止（刚好贴在右侧）
+  } else {
+    // 中间 80% 的时间用来平滑移动
+    scroll_factor = (progress - 0.1f) / 0.8f;
+  }
+
+  int current_offset = (int)(max_scroll * scroll_factor);
+
+  // 裁剪并绘制
+  // 裁剪区域高度设置为 26，确保完整显示当前行文字（包含字体的上伸/下伸部分）
+  dst->setClipRect(safe_pad, y - 11, available_w, 26);
+  dst->setCursor(safe_pad - current_offset, y);
+  dst->print(text);
+  dst->clearClipRect();
+}
+
 static void cover_info_draw()
 {
   if (!s_framesInited) return;
@@ -595,11 +652,11 @@ static void cover_info_draw()
                                 c_lyrics_next, safe_pad);
     }
     
-    // 绘制当前句（白色，高亮）
+    // 绘制当前句（白色，高亮，支持基于时间的滚动）
     if (scroll.current.length() > 0) {
-      draw_center_text_on_sprite(dst, scroll.current.c_str(), 
+      draw_scrolling_line_by_time(dst, scroll.current.c_str(), 
                                 Y_LYRICS_CENTER - offset, 
-                                c_lyrics, safe_pad);
+                                safe_pad, c_lyrics, scroll.progress);
     }
     
     // 绘制下一句（灰色，淡入效果）
@@ -959,6 +1016,9 @@ void ui_init(void)
   cover_frames_init_once();
 
   ui_task_start_once();
+  
+  // 确保 UI 任务创建完成后再开启渲染开关
+  s_ui_hold = false;
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
@@ -1174,6 +1234,26 @@ void ui_scan_end()
   // 无操作
 }
 
+void ui_scan_abort()
+{
+  ui_lock();
+  
+  // 显示"已取消"提示
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  
+  tft.setTextSize(2);
+  draw_center_text("已取消", 100);
+  
+  tft.setTextSize(1);
+  draw_center_text("扫描已中断", 140);
+  
+  // 延迟一段时间让用户看到提示
+  delay(1500);
+  
+  ui_unlock();
+}
+
 void ui_clear_screen()
 {
   ui_lock();
@@ -1268,20 +1348,29 @@ void ui_set_track_pos(int idx, int total)
 static String truncateByPixel(const String& text, int maxWidth)
 {
   String result = text;
-  while (result.length() > 0 && tft.textWidth(result) > maxWidth) {
-    result = result.substring(0, result.length() - 1);
-    // 检查最后一个字符是否是中文字符（UTF-8多字节字符）
-    if (result.length() > 0) {
-      unsigned char last_char = result.charAt(result.length() - 1);
-      if (last_char >= 0x80) {
-        // 是多字节字符，删除整个字符
-        while (result.length() > 0 && (result.charAt(result.length() - 1) & 0xC0) == 0x80) {
-          result = result.substring(0, result.length() - 1);
-        }
-        if (result.length() > 0) {
-          result = result.substring(0, result.length() - 1);
-        }
+  while (result.length() > 0) {
+    // 先检查当前字符串是否符合宽度要求
+    if (tft.textWidth(result) <= maxWidth) {
+      break;
+    }
+    
+    // 按字节长度回退到上一个完整的字符起始位
+    int len = result.length();
+    // 从后向前找到第一个字符的起始位置
+    while (len > 0) {
+      unsigned char c = result.charAt(len - 1);
+      // UTF-8 字符起始字节的最高两位不是 10
+      if ((c & 0xC0) != 0x80) {
+        break;
       }
+      len--;
+    }
+    // 如果找到起始位置，截取到该位置
+    if (len > 0) {
+      result = result.substring(0, len - 1);
+    } else {
+      // 没有找到有效字符，清空
+      result = "";
     }
   }
   return result;
@@ -1320,14 +1409,38 @@ static String getSubStrByCharOffset(const String& text, int charOffset)
 }
 
 // 生成滚动文本（支持副本衔接）
-static String getScrollingText(const String& text, int charOffset, int maxWidth)
+static String getScrollingText(const String& text, int pixelOffset, int maxWidth)
 {
   // 这里增加 6 个空格作为衔接感，视觉上更自然
   String gap = "      ";
   String extendedText = text + gap + text;
 
-  // 从偏移量位置开始截取
-  String startedText = getSubStrByCharOffset(extendedText, charOffset);
+  // 从偏移量位置开始截取（基于像素）
+  // 注意：这里我们仍然需要找到合适的字符边界，避免截断在字符中间
+  int byte_pos = 0;
+  int current_pixel = 0;
+  
+  while (byte_pos < extendedText.length()) {
+    // 计算当前字符的宽度
+    int char_len = 0;
+    unsigned char c = extendedText.charAt(byte_pos);
+    if ((c & 0x80) == 0) char_len = 1;
+    else if ((c & 0xE0) == 0xC0) char_len = 2;
+    else if ((c & 0xF0) == 0xE0) char_len = 3;
+    else char_len = 4;
+    
+    String char_str = extendedText.substring(byte_pos, byte_pos + char_len);
+    int char_width = tft.textWidth(char_str);
+    
+    if (current_pixel + char_width > pixelOffset) {
+      break;
+    }
+    
+    current_pixel += char_width;
+    byte_pos += char_len;
+  }
+  
+  String startedText = extendedText.substring(byte_pos);
 
   // 关键：必须按像素宽度截断，确保它不会覆盖到后面的"（多少首）"
   return truncateByPixel(startedText, maxWidth);
@@ -1337,9 +1450,10 @@ static String getScrollingText(const String& text, int charOffset, int maxWidth)
 // 滚动控制结构体
 struct ListScrollState {
   int scroll_idx = -1;          // 当前滚动项索引
-  int scroll_offset = 0;        // 当前滚动偏移（字符数）
+  int scroll_offset = 0;        // 当前滚动偏移（像素）
   uint32_t last_scroll_time = 0; // 上次滚动时间
-  static constexpr uint32_t SCROLL_INTERVAL_MS = 500; // 调慢滚动
+  static constexpr uint32_t SCROLL_INTERVAL_MS = 50; // 加快滚动频率以获得更丝滑的效果
+  static constexpr int SCROLL_STEP_PX = 2; // 每次滚动的像素数
   
   // 重置滚动状态
   void reset(int new_idx) {
@@ -1370,22 +1484,15 @@ struct ListScrollState {
       return false;
     }
 
-    scroll_offset++;
+    scroll_offset += SCROLL_STEP_PX;
     
-    // 计算字符总长度（用于循环）
-    // 为了美观，我们在衔接处多加几个空格，例如 "歌曲名    歌曲名"
-    int char_len = 0;
-    for (int i = 0; i < name.length(); ) {
-      unsigned char c = name.charAt(i);
-      if ((c & 0x80) == 0) i += 1;
-      else if ((c & 0xE0) == 0xC0) i += 2;
-      else if ((c & 0xF0) == 0xE0) i += 3;
-      else i += 4;
-      char_len++;
-    }
-
-    // 假设衔接间隔为 4 个空格
-    if (scroll_offset >= char_len + 4) {
+    // 计算总滚动长度（包含间隙）
+    String gap = "      ";
+    int gap_width = tft.textWidth(gap);
+    int total_scroll_width = full_text_width + gap_width;
+    
+    // 滚动到末尾后重置
+    if (scroll_offset >= total_scroll_width) {
       scroll_offset = 0;
     }
     return true;
@@ -1648,8 +1755,6 @@ void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_
       drawListItem(groups[i], i, list_pos, is_selected, 
                    is_selected ? s_scroll_state.scroll_offset : 0);
     }
-    
-    s_first_draw = false; // 绘制完后再设为 false
   } else if (need_scroll) {
     // 滚动页面切换，完全重绘
     tft.fillScreen(TFT_BLACK);
@@ -1713,6 +1818,9 @@ void ui_clear_list_select()
   last_drawn_selected = -1;
   last_drawn_offset = -1;
   s_scroll_state.reset(-1); // 重置滚动状态
+  
+  // 清除裁剪区域，避免异常退出时裁剪区域未被清除
+  tft.clearClipRect();
   
   ui_unlock();
 }

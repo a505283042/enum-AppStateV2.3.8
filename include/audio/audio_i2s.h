@@ -10,3 +10,4 @@ bool audio_i2s_set_sample_rate(int sample_rate); // 设置采样率
 void     audio_i2s_reset_play_pos();
 uint32_t audio_i2s_get_play_ms();
 int      audio_i2s_get_sample_rate();
+void     audio_i2s_zero_dma_buffer();  // 清空 DMA 缓冲区，消除底噪
