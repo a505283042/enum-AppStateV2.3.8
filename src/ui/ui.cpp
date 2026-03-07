@@ -144,6 +144,7 @@ void ui_hold_render(bool hold)
     s_rot_last_ms = millis();
   } else {
     // 解除 hold 时，立即通知 UI 任务唤醒，避免等待下一个周期
+    s_rot_last_ms = millis(); // 重置旋转时间戳，避免角度跳变
     if (s_ui_task) {
       xTaskNotifyGive(s_ui_task);
     }
@@ -737,11 +738,14 @@ static void ui_task_entry(void*)
     // 检查是否处于列表选择模式
     if (player_is_in_list_select_mode()) {
       // 列表选择模式下持续重绘（用于滚动显示）
+      ui_lock();
       int current_idx = player_get_list_selected_idx();
       ListSelectState state = player_get_list_select_state();
       const char* title = (state == ListSelectState::ARTIST) ? "选择歌手" : "选择专辑";
-      ui_draw_list_select(player_get_list_groups(), current_idx, title);
+      const auto& groups = player_get_list_groups();
+      ui_draw_list_select(groups, current_idx, title);
       s_list_last_drawn_idx = current_idx;
+      ui_unlock();
       continue;
     }
 
@@ -1540,11 +1544,10 @@ static void drawListItem(const PlaylistGroup& group, int idx, int list_pos,
 // 参数: groups - 列表组数据
 //       selected_idx - 当前选中的索引
 //       title - 界面标题（"选择歌手"或"选择专辑"）
+// 注意: 调用此函数前必须已获取 ui_lock()
 void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_idx, const char* title)
 {
   if (groups.empty()) return;
-
-  ui_lock();
 
   // 计算显示范围（最多显示5项）
   const int ITEMS_VISIBLE = 5;
@@ -1609,7 +1612,6 @@ void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_
   if (!s_first_draw && selected_idx == last_drawn_selected && 
       s_scroll_state.scroll_offset == last_drawn_offset && !is_offset_changed) {
     // 无变化，直接返回
-    ui_unlock();
     return;
   }
 
@@ -1696,8 +1698,6 @@ void ui_draw_list_select(const std::vector<PlaylistGroup>& groups, int selected_
   last_drawn_selected = selected_idx;
   last_drawn_offset = s_scroll_state.scroll_offset;
   s_first_draw = false;
-
-  ui_unlock();
 }
 
 // 清除列表选择界面

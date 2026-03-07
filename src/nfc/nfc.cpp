@@ -29,8 +29,8 @@ void nfc_init()
 /* 轮询NFC模块 - 检测NFC标签/卡片并处理它们 */
 void nfc_poll(void)
 {
-    // Poll for NFC tags/cards
-    // For now, just log that polling occurred
-    // In a real implementation, this would check for NFC tags and handle them
+    // 轮询NFC标签/卡片
+    // 目前仅记录轮询已发生
+    // 在实际实现中，这里会检测NFC标签并进行处理
     // TODO: 实现NFC标签检测和处理功能
 }

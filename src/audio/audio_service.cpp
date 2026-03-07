@@ -71,14 +71,16 @@ static void audio_task_entry(void*)
     // 2) 持续喂音频（播放时必须高频）
     audio_loop();
 
-    // 3) 同步缓存：处理“自然播放结束”这种情况
+    // 3) 同步缓存：处理"自然播放结束"这种情况
     s_playing_cache = audio_is_playing();
 
-    // 4) 让出一点点 CPU：空闲时轻微 delay
+    // 4) CPU 使用优化：
+    //    - 播放时：audio_loop 内部的 i2s_write 会阻塞，但仍需小延迟避免 100% 占用
+    //    - 空闲时：较长延迟节省 CPU
     if (!s_playing_cache) {
-      vTaskDelay(1);
+      vTaskDelay(2);  // 空闲时延迟 2ms
     } else {
-      taskYIELD();
+      vTaskDelay(1);  // 播放时延迟 1ms，确保其他任务有机会运行
     }
   }
 }
@@ -113,7 +115,11 @@ static bool send_cmd(AudioCmd& cmd, bool wait)
 
   cmd.notify_to = wait ? xTaskGetCurrentTaskHandle() : nullptr;
 
-  if (xQueueSend(s_q, &cmd, portMAX_DELAY) != pdTRUE) return false;
+  // 使用 100ms 超时，避免 UI 线程卡死
+  if (xQueueSend(s_q, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
+    Serial.println("[AUDIO] 发送命令超时，音频核心忙");
+    return false;
+  }
   if (!wait) return true;
 
   uint32_t ack = 0;

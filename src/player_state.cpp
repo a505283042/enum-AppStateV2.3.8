@@ -1,5 +1,6 @@
 #include "player_state.h"
 #include <Arduino.h>
+#include <random>
 #include "ui/ui.h"
 #include "audio/audio_service.h"
 #include "audio/audio.h"
@@ -11,11 +12,7 @@
 static bool s_started = false;
 static int  s_cur = 0;
 
-// 随机索引表
-static int  s_random_table[1024];
-static int  s_random_table_size = 0;
-static int  s_random_table_pos  = 0;
-static constexpr int RANDOM_TABLE_MAX = sizeof(s_random_table) / sizeof(s_random_table[0]);
+// 随机播放相关变量已移除，改为直接打乱 s_current_playlist
 
 // 用户主动暂停/停止时，不自动下一首
 static bool s_user_paused = false;
@@ -32,8 +29,19 @@ static ListSelectState s_list_state = ListSelectState::NONE;
 static int s_list_selected_idx = 0;
 static std::vector<PlaylistGroup> s_list_groups;  // 缓存当前列表
 
+// 基于筛选器的动态列表 + 统一索引缓存
+// ⚠️ 内存警告：static 变量分配在全局区域（不占栈），但占用 RAM
+// - 2000 首歌约占用 8KB（2000 * 4 bytes）
+// - 如果未来支持上万首歌，建议显式分配到 PSRAM
+static std::vector<int> s_current_playlist;       // 缓存当前播放列表
+static int s_current_playlist_pos = -1;           // 缓存当前歌曲在播放列表中的位置
+static play_mode_t s_last_play_mode = PLAY_MODE_ALL_SEQ;  // 上一次的播放模式
+static int s_last_group_idx = -1;                 // 上一次的分组索引
+
+// 随机数生成器（静态，避免栈溢出）
+static std::mt19937 g_rng(millis());
+
 // 前向声明
-static void regenerate_random_table();
 
 // 根据当前歌曲查找所属的歌手组索引
 static int find_current_artist_group(void)
@@ -78,42 +86,86 @@ static int find_current_album_group(void)
   return 0;
 }
 
-// 获取当前播放列表（根据播放模式）
-static std::vector<int> get_current_playlist(void)
+// 更新当前播放列表缓存
+static void update_playlist_cache(void)
 {
-  std::vector<int> playlist;
   const auto& tracks_list = storage_get_tracks();
+  bool need_update = false;
 
-  switch (g_play_mode) {
-    case PLAY_MODE_ALL_SEQ:
-    case PLAY_MODE_ALL_RND:
-      for (int i = 0; i < (int)tracks_list.size(); i++) {
-        playlist.push_back(i);
-      }
-      break;
-
-    case PLAY_MODE_ARTIST_SEQ:
-    case PLAY_MODE_ARTIST_RND: {
-      auto groups = storage_get_artist_groups();
-      if (s_current_group_idx >= (int)groups.size()) s_current_group_idx = 0;
-      if (!groups.empty()) {
-        playlist = groups[s_current_group_idx].track_indices;
-      }
-      break;
-    }
-
-    case PLAY_MODE_ALBUM_SEQ:
-    case PLAY_MODE_ALBUM_RND: {
-      auto groups = storage_get_album_groups();
-      if (s_current_group_idx >= (int)groups.size()) s_current_group_idx = 0;
-      if (!groups.empty()) {
-        playlist = groups[s_current_group_idx].track_indices;
-      }
-      break;
-    }
+  // 检查是否需要更新缓存
+  if (g_play_mode != s_last_play_mode) {
+    need_update = true;
+  } else if ((g_play_mode == PLAY_MODE_ARTIST_SEQ || g_play_mode == PLAY_MODE_ARTIST_RND ||
+              g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) &&
+             s_current_group_idx != s_last_group_idx) {
+    need_update = true;
   }
 
-  return playlist;
+  if (need_update) {
+    s_current_playlist.clear();
+    s_current_playlist_pos = -1;
+
+    switch (g_play_mode) {
+      case PLAY_MODE_ALL_SEQ:
+      case PLAY_MODE_ALL_RND:
+        for (int i = 0; i < (int)tracks_list.size(); i++) {
+          s_current_playlist.push_back(i);
+        }
+        break;
+
+      case PLAY_MODE_ARTIST_SEQ:
+      case PLAY_MODE_ARTIST_RND: {
+        auto groups = storage_get_artist_groups();
+        if (s_current_group_idx >= (int)groups.size()) s_current_group_idx = 0;
+        if (!groups.empty()) {
+          s_current_playlist = groups[s_current_group_idx].track_indices;
+        }
+        break;
+      }
+
+      case PLAY_MODE_ALBUM_SEQ:
+      case PLAY_MODE_ALBUM_RND: {
+        auto groups = storage_get_album_groups();
+        if (s_current_group_idx >= (int)groups.size()) s_current_group_idx = 0;
+        if (!groups.empty()) {
+          s_current_playlist = groups[s_current_group_idx].track_indices;
+        }
+        break;
+      }
+    }
+
+    // 检查是否为随机模式
+    bool is_rnd = (g_play_mode == PLAY_MODE_ALL_RND ||
+                   g_play_mode == PLAY_MODE_ARTIST_RND ||
+                   g_play_mode == PLAY_MODE_ALBUM_RND);
+
+    // 如果是随机模式，打乱列表
+    if (is_rnd && !s_current_playlist.empty()) {
+      // 洗牌整个列表（使用静态随机数生成器，避免栈溢出）
+      std::shuffle(s_current_playlist.begin(), s_current_playlist.end(), g_rng);
+    }
+
+    // 尝试找到当前歌曲在新播放列表中的位置
+    if (!s_current_playlist.empty()) {
+      for (int i = 0; i < (int)s_current_playlist.size(); i++) {
+        if (s_current_playlist[i] == s_cur) {
+          s_current_playlist_pos = i;
+          break;
+        }
+      }
+    }
+
+    // 更新缓存状态
+    s_last_play_mode = g_play_mode;
+    s_last_group_idx = s_current_group_idx;
+  }
+}
+
+// 获取当前播放列表（使用缓存机制）
+static const std::vector<int>& get_current_playlist(void)
+{
+  update_playlist_cache();
+  return s_current_playlist;
 }
 
 // 统一播放入口：切歌时会 stop->解封面->play；恢复播放时尽量复用封面
@@ -125,6 +177,17 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     if (idx < 0) idx = 0;
     if (idx >= (int)tracks_list.size()) idx = 0;
     s_cur = idx;
+
+    // 更新播放列表缓存和当前位置
+    update_playlist_cache();
+    if (!s_current_playlist.empty()) {
+      for (int i = 0; i < (int)s_current_playlist.size(); i++) {
+        if (s_current_playlist[i] == s_cur) {
+          s_current_playlist_pos = i;
+          break;
+        }
+      }
+    }
 
     const TrackInfo& t = tracks_list[s_cur];
 
@@ -222,15 +285,8 @@ static void player_play_idx(int idx, bool verbose, bool force_cover)
     ui_set_play_mode(g_play_mode);
     ui_set_volume(audio_get_volume());
 
-    // ✅ 解冻 UI，让 UI 先显示封面（歌词稍后加载）
+    // ✅ 解冻 UI，让 UI 先显示封面（歌词已在并行任务中加载）
     ui_hold_render(false);
-    
-    // 加载歌词文件（UI 已解冻，用户可以先看到封面）
-    if (t.lrc_path.length() > 0) {
-        g_lyricsDisplay.loadFromPath(t.lrc_path.c_str());
-    } else {
-        g_lyricsDisplay.clear();
-    }
 
     if (!audio_service_play(t.audio_path.c_str(), true)) {
         LOGE("[AUDIO] play failed");
@@ -286,33 +342,37 @@ void player_state_run(void)
 
     // ✅ 播放自然结束 -> 下一首（循环或随机）
     if (entered && s_started && !tracks_list.empty() && !s_user_paused && !audio_service_is_playing()) {
-        std::vector<int> playlist = get_current_playlist();
+        const auto& playlist = get_current_playlist();
         if (playlist.empty()) return;
         
+        // 统一使用顺序逻辑，因为随机模式下列表已经被打乱
         int next;
-        if (g_random_play) {
-            if (s_random_table_size > 0) {
-                next = s_random_table[s_random_table_pos];
-                s_random_table_pos = (s_random_table_pos + 1) % s_random_table_size;
-            } else {
-                next = s_cur;
+        // 使用缓存的当前位置，避免线性查找
+        int current_pos = s_current_playlist_pos;
+        
+        if (current_pos >= 0 && current_pos < (int)playlist.size() && playlist[current_pos] == s_cur) {
+            // 缓存位置有效，直接使用
+            current_pos++;
+            if (current_pos >= (int)playlist.size()) {
+                current_pos = 0;
             }
+            next = playlist[current_pos];
         } else {
-            // 在当前播放列表中找到当前歌曲的位置
-            int current_pos = -1;
+            // 缓存位置无效，回退到线性查找
+            int pos = -1;
             for (int i = 0; i < (int)playlist.size(); i++) {
                 if (playlist[i] == s_cur) {
-                    current_pos = i;
+                    pos = i;
                     break;
                 }
             }
             
-            if (current_pos >= 0) {
-                current_pos++;
-                if (current_pos >= (int)playlist.size()) {
-                    current_pos = 0;
+            if (pos >= 0) {
+                pos++;
+                if (pos >= (int)playlist.size()) {
+                    pos = 0;
                 }
-                next = playlist[current_pos];
+                next = playlist[pos];
             } else {
                 next = s_cur + 1;
                 if (next >= (int)tracks_list.size()) next = 0;
@@ -330,35 +390,36 @@ void player_next_track()
   if (tracks_list.empty()) return;
 
   int next;
-  bool is_random = (g_play_mode == PLAY_MODE_ALL_RND || 
-                    g_play_mode == PLAY_MODE_ARTIST_RND || 
-                    g_play_mode == PLAY_MODE_ALBUM_RND);
+  // 统一使用顺序逻辑，因为随机模式下列表已经被打乱
+  const auto& playlist = get_current_playlist();
+  if (playlist.empty()) return;
 
-  if (is_random) {
-    if (s_random_table_size > 0) {
-      next = s_random_table[s_random_table_pos];
-      s_random_table_pos = (s_random_table_pos + 1) % s_random_table_size;
-    } else {
-      next = s_cur;
+  // 使用缓存的当前位置，避免线性查找
+  int current_pos = s_current_playlist_pos;
+  
+  if (current_pos >= 0 && current_pos < (int)playlist.size() && playlist[current_pos] == s_cur) {
+    // 缓存位置有效，直接使用
+    current_pos++;
+    if (current_pos >= (int)playlist.size()) {
+      current_pos = 0;
     }
+    next = playlist[current_pos];
   } else {
-    std::vector<int> playlist = get_current_playlist();
-    if (playlist.empty()) return;
-
-    int current_pos = -1;
+    // 缓存位置无效，回退到线性查找
+    int pos = -1;
     for (int i = 0; i < (int)playlist.size(); i++) {
       if (playlist[i] == s_cur) {
-        current_pos = i;
+        pos = i;
         break;
       }
     }
 
-    if (current_pos >= 0) {
-      current_pos++;
-      if (current_pos >= (int)playlist.size()) {
-        current_pos = 0;
+    if (pos >= 0) {
+      pos++;
+      if (pos >= (int)playlist.size()) {
+        pos = 0;
       }
-      next = playlist[current_pos];
+      next = playlist[pos];
     } else {
       next = s_cur + 1;
       if (next >= (int)tracks_list.size()) next = 0;
@@ -375,39 +436,39 @@ void player_prev_track()
     if (tracks_list.empty()) return;
 
     int prev;
-    if (g_random_play) {
-        if (s_random_table_size > 0) {
-            // 随机模式：位置指针总是指向下一首，所以要回退两次
-            // 第一次回退到当前歌曲的位置，第二次回退到上一首
-            int prev_pos = (s_random_table_pos - 2 + s_random_table_size) % s_random_table_size;
-            prev = s_random_table[prev_pos];
-            // 更新位置指针到上一首的位置，这样下次按“下一曲”时会从正确位置开始
-            s_random_table_pos = (prev_pos + 1) % s_random_table_size;
-        } else {
-            prev = s_cur;
-        }
-    } else {
-        // 顺序模式：使用当前索引的前一个
-        std::vector<int> playlist = get_current_playlist();
-        if (playlist.empty()) return;
+    // 统一使用顺序逻辑，因为随机模式下列表已经被打乱
+    const auto& playlist = get_current_playlist();
+    if (playlist.empty()) return;
 
-        int current_pos = -1;
-        for (int i = 0; i < (int)playlist.size(); i++) {
-          if (playlist[i] == s_cur) {
-            current_pos = i;
-            break;
-          }
-        }
-
-        if (current_pos >= 0) {
-          current_pos--;
-          if (current_pos < 0) {
+    // 使用缓存的当前位置，避免线性查找
+    int current_pos = s_current_playlist_pos;
+    
+    if (current_pos >= 0 && current_pos < (int)playlist.size() && playlist[current_pos] == s_cur) {
+        // 缓存位置有效，直接使用
+        current_pos--;
+        if (current_pos < 0) {
             current_pos = (int)playlist.size() - 1;
-          }
-          prev = playlist[current_pos];
+        }
+        prev = playlist[current_pos];
+    } else {
+        // 缓存位置无效，回退到线性查找
+        int pos = -1;
+        for (int i = 0; i < (int)playlist.size(); i++) {
+            if (playlist[i] == s_cur) {
+                pos = i;
+                break;
+            }
+        }
+
+        if (pos >= 0) {
+            pos--;
+            if (pos < 0) {
+                pos = (int)playlist.size() - 1;
+            }
+            prev = playlist[pos];
         } else {
-          prev = s_cur - 1;
-          if (prev < 0) prev = (int)tracks_list.size() - 1;
+            prev = s_cur - 1;
+            if (prev < 0) prev = (int)tracks_list.size() - 1;
         }
     }
 
@@ -581,36 +642,7 @@ void player_handle_list_select_key(key_event_t evt)
     }
 }
 
-// 重新生成当前播放列表的随机表（切换歌手/专辑组时调用）
-static void regenerate_random_table()
-{
-    std::vector<int> playlist = get_current_playlist();
-    if (!playlist.empty()) {
-        int total = (int)playlist.size();
-        s_random_table_size = (total > RANDOM_TABLE_MAX) ? RANDOM_TABLE_MAX : total;
-        s_random_table_pos = 0;
-
-        if (total > RANDOM_TABLE_MAX) {
-            LOGW("[PLAYER] 随机表容量=%d，但曲目=%d，已截断到前 %d 首（防止溢出）",
-                 RANDOM_TABLE_MAX, total, s_random_table_size);
-        }
-
-        for (int i = 0; i < s_random_table_size; i++) {
-            s_random_table[i] = playlist[i];
-        }
-        for (int i = s_random_table_size - 1; i > 0; i--) {
-            int j = random(i + 1);
-            int temp = s_random_table[i];
-            s_random_table[i] = s_random_table[j];
-            s_random_table[j] = temp;
-        }
-
-        LOGI("[PLAYER] 随机表已重新生成 (大小: %d)", s_random_table_size);
-    } else {
-        s_random_table_size = 0;
-        LOGI("[PLAYER] 随机表为空 (无歌曲)");
-    }
-}
+// 随机表函数已移除，改为直接在 update_playlist_cache 中打乱列表
 
 void player_toggle_random()
 {
@@ -631,10 +663,9 @@ void player_toggle_random()
                       g_play_mode == PLAY_MODE_ALBUM_RND);
 
     if (is_random) {
-        regenerate_random_table();
-        LOGI("[PLAYER] 随机播放: 开启 (索引表大小: %d)", s_random_table_size);
+        // 随机播放已开启，列表会在 update_playlist_cache 中自动打乱
+        LOGI("[PLAYER] 随机播放: 开启");
     } else {
-        s_random_table_size = 0;
         LOGI("[PLAYER] 随机播放: 关闭");
     }
 
@@ -647,16 +678,9 @@ void player_toggle_random()
         g_play_mode == PLAY_MODE_ALBUM_SEQ || g_play_mode == PLAY_MODE_ALBUM_RND) {
         const auto& tracks_list = storage_get_tracks();
         if (!tracks_list.empty()) {
-            std::vector<int> playlist = get_current_playlist();
+            const auto& playlist = get_current_playlist();
             int display_total = (int)playlist.size();
-            int display_pos = 0;
-            // 查找当前歌曲在组内的位置
-            for (int i = 0; i < (int)playlist.size(); i++) {
-                if (playlist[i] == s_cur) {
-                    display_pos = i;
-                    break;
-                }
-            }
+            int display_pos = (s_current_playlist_pos >= 0) ? s_current_playlist_pos : 0;
             ui_set_track_pos(display_pos, display_total);
         }
     } else {

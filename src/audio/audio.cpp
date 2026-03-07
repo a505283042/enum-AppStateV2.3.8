@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <SdFat.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "board/board_pins.h"
 #include "storage/storage.h"      // 你如果能拿到 SdFat sd 也行
@@ -8,8 +10,10 @@
 #include "audio/audio_mp3.h"
 #include "audio/audio_flac.h"
 #include "dr_flac.h"
+#include "utils/log.h"
 
 extern SdFat sd;   // 你工程已有全局 sd
+extern SemaphoreHandle_t g_sd_mutex;  // SD 卡访问互斥锁
 
 static enum { DEC_NONE, DEC_MP3, DEC_FLAC } g_dec = DEC_NONE;
 // --- Total duration (ms), 0 = unknown ---
@@ -92,14 +96,62 @@ static uint32_t mp3_bitrate_kbps(uint32_t ver, uint32_t layer, uint32_t br_idx)
 
 static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
 {
-  File32 f = sd.open(path, O_RDONLY);
-  if (!f) return 0;
+  uint32_t ms = 0;
+  File32 f;
+  bool sd_mutex_taken = false;
+  bool buf_mutex_taken = false;
+  uint32_t fileSize = 0;
+  uint32_t tailCut = 0;
+  uint32_t skip = 0;
+  uint32_t base = 0;
+  uint32_t framePos = 0;
+  uint32_t hdr = 0;
+  bool found = false;
+  uint32_t ver = 0;
+  uint32_t layer = 0;
+  uint32_t prot = 0;
+  uint32_t brIdx = 0;
+  uint32_t srIdx = 0;
+  uint32_t chMode = 0;
+  uint32_t sr = 0;
+  uint32_t br_kbps = 0;
+  bool mono = false;
+  uint32_t sideinfo = 0;
+  uint32_t xingOff = 0;
+  int hn = 0;
+  uint32_t audioBytes = 0;
+  uint64_t bits = 0;
+  uint32_t frames = 0;
+  uint32_t spf = 0;
+  uint64_t totalSamples = 0;
+  uint32_t flags = 0;
+  const uint8_t* p = nullptr;
+  const uint8_t* q = nullptr;
 
-  uint32_t fileSize = (uint32_t)f.fileSize();
-  if (fileSize < 16) { f.close(); return 0; }
+  // 保护 static 缓冲区的互斥锁（防止多线程调用时数据混乱）
+  static SemaphoreHandle_t s_buf_mutex = nullptr;
+  if (s_buf_mutex == nullptr) {
+    s_buf_mutex = xSemaphoreCreateMutex();
+    if (s_buf_mutex == nullptr) return 0;
+  }
+
+  // 获取 SD 卡互斥锁（切歌时可能需要等待 UI 线程加载封面完成）
+  if (g_sd_mutex == nullptr) goto cleanup;
+  if (xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(500)) != pdTRUE) goto cleanup;
+  sd_mutex_taken = true;
+
+  // 获取缓冲区互斥锁
+  if (xSemaphoreTake(s_buf_mutex, pdMS_TO_TICKS(500)) != pdTRUE) goto cleanup;
+  buf_mutex_taken = true;
+
+  f = sd.open(path, O_RDONLY);
+  if (!f) goto cleanup;
+
+  fileSize = (uint32_t)f.fileSize();
+  if (fileSize < 16) goto cleanup;
 
   // subtract ID3v1 if present
-  uint32_t tailCut = 0;
+  tailCut = 0;
   if (fileSize >= 128) {
     uint8_t tail[3];
     f.seekSet(fileSize - 128);
@@ -108,18 +160,19 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
 
   // skip ID3v2
   f.seekSet(0);
-  uint32_t skip = id3v2_skip_bytes(f);
+  skip = id3v2_skip_bytes(f);
   if (skip > 0 && skip < fileSize) f.seekSet(skip);
   else f.seekSet(0);
 
-  // scan first ~32KB for a valid frame header
-  uint8_t buf[4096];
-  uint32_t base = (uint32_t)f.curPosition();
-  uint32_t framePos = 0;
-  uint32_t hdr = 0;
-  bool found = false;
+  // scan first 256KB for a valid frame header（处理大专辑封面）
+  // 使用 static 避免占用栈空间（4KB 缓冲区对 12KB 栈来说太大了）
+  static uint8_t buf[4096];
+  base = (uint32_t)f.curPosition();
+  framePos = 0;
+  hdr = 0;
+  found = false;
 
-  for (int blk = 0; blk < 8 && (base + blk * sizeof(buf)) < fileSize; ++blk) {
+  for (int blk = 0; blk < 64; ++blk) {
     uint32_t pos = base + blk * (uint32_t)sizeof(buf);
     f.seekSet(pos);
     int n = f.read(buf, sizeof(buf));
@@ -136,60 +189,59 @@ static uint32_t sniff_mp3_total_ms(SdFat& sd, const char* path)
     if (found) break;
   }
 
-  if (!found) { f.close(); return 0; }
+  if (!found) goto cleanup;
 
-  uint32_t ver   = (hdr >> 19) & 3u;
-  uint32_t layer = (hdr >> 17) & 3u;    // 01 = L3
-  uint32_t prot  = (hdr >> 16) & 1u;    // 0 has CRC
-  uint32_t brIdx = (hdr >> 12) & 0xFu;
-  uint32_t srIdx = (hdr >> 10) & 3u;
-  uint32_t chMode= (hdr >> 6)  & 3u;
+  ver   = (hdr >> 19) & 3u;
+  layer = (hdr >> 17) & 3u;
+  prot  = (hdr >> 16) & 1u;
+  brIdx = (hdr >> 12) & 0xFu;
+  srIdx = (hdr >> 10) & 3u;
+  chMode= (hdr >> 6)  & 3u;
 
-  uint32_t sr = mp3_sample_rate(ver, srIdx);
-  uint32_t br_kbps = mp3_bitrate_kbps(ver, layer, brIdx);
+  sr = mp3_sample_rate(ver, srIdx);
+  br_kbps = mp3_bitrate_kbps(ver, layer, brIdx);
 
   // Try Xing/Info (VBR header) in first frame
-  bool mono = (chMode == 3);
-  uint32_t sideinfo = 0;
+  mono = (chMode == 3);
+  sideinfo = 0;
   if (ver == 3) sideinfo = mono ? 17 : 32;
   else sideinfo = mono ? 9 : 17;
 
-  uint32_t xingOff = 4 + (prot ? 0 : 2) + sideinfo;
+  xingOff = 4 + (prot ? 0 : 2) + sideinfo;
 
   f.seekSet(framePos);
-  uint8_t head[256];
-  int hn = f.read(head, sizeof(head));
+  static uint8_t head[256];
+  hn = f.read(head, sizeof(head));
   if (hn > (int)(xingOff + 16)) {
-    const uint8_t* p = head + xingOff;
+    p = head + xingOff;
     if ((p[0]=='X'&&p[1]=='i'&&p[2]=='n'&&p[3]=='g') || (p[0]=='I'&&p[1]=='n'&&p[2]=='f'&&p[3]=='o')) {
-      uint32_t flags = be32(p + 4);
-      const uint8_t* q = p + 8;
-      if (flags & 0x0001u) { // frames field present
-        uint32_t frames = be32(q);
-        uint32_t spf = (ver == 3) ? 1152u : 576u;
+      flags = be32(p + 4);
+      q = p + 8;
+      if (flags & 0x0001u) {
+        frames = be32(q);
+        spf = (ver == 3) ? 1152u : 576u;
         if (sr > 0 && frames > 0) {
-          uint64_t totalSamples = (uint64_t)frames * (uint64_t)spf;
-          uint32_t ms = (uint32_t)((totalSamples * 1000ull) / (uint64_t)sr);
-          f.close();
-          return ms;
+          totalSamples = (uint64_t)frames * (uint64_t)spf;
+          ms = (uint32_t)((totalSamples * 1000ull) / (uint64_t)sr);
         }
       }
     }
   }
 
   // Fallback: assume CBR (or rough VBR) using file size and bitrate
-  if (br_kbps > 0) {
-    uint32_t audioBytes = fileSize - framePos;
+  if (ms == 0 && br_kbps > 0) {
+    audioBytes = fileSize - framePos;
     if (tailCut && audioBytes > tailCut) audioBytes -= tailCut;
 
-    uint64_t bits = (uint64_t)audioBytes * 8ull;
-    uint32_t ms = (uint32_t)(bits / (uint64_t)br_kbps); // kbps => bits/ms
-    f.close();
-    return ms;
+    bits = (uint64_t)audioBytes * 8ull;
+    ms = (uint32_t)(bits / (uint64_t)br_kbps);
   }
 
-  f.close();
-  return 0;
+cleanup:
+  if (f) f.close();
+  if (buf_mutex_taken) xSemaphoreGive(s_buf_mutex);
+  if (sd_mutex_taken) xSemaphoreGive(g_sd_mutex);
+  return ms;
 }
 
 // dr_flac callbacks for SdFat::File32
@@ -221,19 +273,30 @@ static drflac_bool32 flac_on_tell(void* pUserData, drflac_int64* pCursor)
 
 static uint32_t sniff_flac_total_ms(SdFat& sd, const char* path)
 {
-  File32 f = sd.open(path, O_RDONLY);
-  if (!f) return 0;
-
-  drflac* p = drflac_open(flac_on_read, flac_on_seek, flac_on_tell, &f, nullptr);
-  if (!p) { f.close(); return 0; }
-
   uint32_t ms = 0;
+  drflac* p = nullptr;
+  File32 f;
+  bool mutex_taken = false;
+
+  // 获取 SD 卡互斥锁（切歌时可能需要等待 UI 线程加载封面完成）
+  if (g_sd_mutex == nullptr) goto cleanup;
+  if (xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(500)) != pdTRUE) goto cleanup;
+  mutex_taken = true;
+
+  f = sd.open(path, O_RDONLY);
+  if (!f) goto cleanup;
+
+  p = drflac_open(flac_on_read, flac_on_seek, flac_on_tell, &f, nullptr);
+  if (!p) goto cleanup;
+
   if (p->sampleRate > 0 && p->totalPCMFrameCount > 0) {
     ms = (uint32_t)((p->totalPCMFrameCount * 1000ull) / (uint64_t)p->sampleRate);
   }
 
-  drflac_close(p);
-  f.close();
+cleanup:
+  if (p) drflac_close(p);
+  if (f) f.close();
+  if (mutex_taken) xSemaphoreGive(g_sd_mutex);
   return ms;
 }
 
@@ -247,6 +310,12 @@ static uint32_t sniff_total_ms(SdFat& sd, const char* path)
 
 bool audio_init()
 {
+  // SD 卡互斥锁已在 storage_init() 中创建
+  if (g_sd_mutex == nullptr) {
+    LOGE("[AUDIO] SD 互斥锁未初始化，请确保先调用 storage_init()");
+    return false;
+  }
+  
   // 先按常用 44100 初始化一次（后续会根据文件采样率更新 clk）
   return audio_i2s_init(PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT, 44100);
 }

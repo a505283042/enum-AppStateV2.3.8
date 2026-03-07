@@ -2,9 +2,14 @@
 #include "utils/log.h"
 #include <algorithm>
 #include <SdFat.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // 外部声明 SdFat 对象（定义在 storage.cpp）
 extern SdFat sd;
+
+// 外部声明 SD 卡互斥锁（定义在 storage.cpp）
+extern SemaphoreHandle_t g_sd_mutex;
 
 // 全局歌词显示实例
 LyricsDisplay g_lyricsDisplay;
@@ -22,9 +27,21 @@ bool LyricsParser::loadFromFile(const char* path) {
     
     uint32_t t0 = millis();
     
+    // 获取 SD 卡互斥锁，防止与音频解码线程冲突
+    if (g_sd_mutex == nullptr) {
+        LOGW("[LYRICS] SD 互斥锁未初始化");
+        return false;
+    }
+    
+    if (xSemaphoreTake(g_sd_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        LOGW("[LYRICS] 获取 SD 锁超时");
+        return false;
+    }
+    
     File32 file = sd.open(path, O_RDONLY);
     if (!file) {
         LOGW("[LYRICS] Failed to open: %s", path);
+        xSemaphoreGive(g_sd_mutex);
         return false;
     }
     
@@ -33,6 +50,7 @@ bool LyricsParser::loadFromFile(const char* path) {
     uint32_t fileSize = file.fileSize();
     if (fileSize == 0 || fileSize > 65536) {
         file.close();
+        xSemaphoreGive(g_sd_mutex);
         LOGW("[LYRICS] Invalid file size: %u", fileSize);
         return false;
     }
@@ -48,6 +66,9 @@ bool LyricsParser::loadFromFile(const char* path) {
         }
     }
     file.close();
+    
+    // 释放 SD 卡互斥锁
+    xSemaphoreGive(g_sd_mutex);
     
     uint32_t t2 = millis();
     
@@ -168,15 +189,12 @@ int LyricsParser::getCurrentIndex(uint32_t time_ms) const {
         return 0;
     }
     
-    int index = 0;
-    for (int i = 0; i < (int)m_lines.size(); i++) {
-        if (m_lines[i].time_ms <= time_ms) {
-            index = i;
-        } else {
-            break;
-        }
-    }
-    return index;
+    // 使用二分查找优化性能 O(log n)
+    auto it = std::upper_bound(m_lines.begin(), m_lines.end(), time_ms, 
+         [](uint32_t t, const LyricLine& line) { return t < line.time_ms; });
+    
+    int idx = std::distance(m_lines.begin(), it) - 1;
+    return (idx < 0) ? 0 : idx;
 }
 
 const LyricLine* LyricsParser::getLine(int index) const {

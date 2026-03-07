@@ -47,7 +47,7 @@ static int16_t s_vol_buf[VOL_BUF_SAMPLES];
 
 static inline int16_t vol_scale_s16(int16_t x, uint16_t g_q15)
 {
-  return (int16_t)(((int32_t)x * (int32_t)g_q15) >> 15);
+  return (int16_t)(((int32_t)x * (int32_t)g_q15 + 16384) >> 15);
 }
 
 bool audio_i2s_init(int bck, int ws, int dout, int sample_rate)
@@ -55,6 +55,10 @@ bool audio_i2s_init(int bck, int ws, int dout, int sample_rate)
     if (g_inited) {
         // 只改时钟，不重装驱动
         i2s_set_clk(I2S_PORT, sample_rate, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+        // 更新采样率变量，确保播放时间计算准确
+        portENTER_CRITICAL(&s_pos_mux);
+        s_sample_rate = sample_rate;
+        portEXIT_CRITICAL(&s_pos_mux);
         return true;
     }
 
@@ -135,18 +139,20 @@ size_t audio_i2s_write_frames(const int16_t* stereo_samples, size_t frames)
         const size_t chunk_bytes = n * sizeof(int16_t);
         size_t chunk_written = 0;
 
-        // ✅ 关键：你现在音频独占 core0，可以放心阻塞写，保证 DMA 不断粮
+        // ✅ 使用 100ms 超时，避免 I2S 硬件异常时死锁
         esp_err_t err = i2s_write(I2S_PORT,
                                   (const char*)out,
                                   chunk_bytes,
                                   &chunk_written,
-                                  portMAX_DELAY);
+                                  pdMS_TO_TICKS(100));
 
         if (err != ESP_OK) {
+            LOGE("[I2S] 写入失败: %d", err);
             return SIZE_MAX;
         }
 
         if (chunk_written == 0) {
+            LOGW("[I2S] 写入超时，未写入数据");
             break;
         }
 

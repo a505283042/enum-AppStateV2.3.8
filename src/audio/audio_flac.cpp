@@ -15,6 +15,7 @@ static int g_sr = 44100;
 static uint32_t g_ch = 2;
 static size_t s_pending_off = 0;
 static size_t s_pending_frames = 0;
+static int s_last_sr = 0; // 上次设置的采样率（文件级 static，便于重置）
 
 static size_t on_read(void* user, void* bufferOut, size_t bytesToRead)
 {
@@ -70,6 +71,12 @@ bool audio_flac_start(SdFat& sd, const char* path)
 
   g_sr = (int)g_flac->sampleRate;
   g_ch = g_flac->channels;
+  if (g_ch > 2 || g_ch == 0) {
+    LOGE("[FLAC] Unsupported channels: %d", g_ch);
+    audio_flac_stop();
+    return false;
+  }
+  s_last_sr = 0; // 重置采样率缓存，确保新文件一定会设置 I2S 时钟
   g_playing = true;
   return true;
 }
@@ -91,8 +98,9 @@ bool audio_flac_loop()
 {
   if (!g_playing || !g_flac) return false;
 
-  constexpr uint32_t PCM_FRAMES = 1024;
-  static int16_t pcm[PCM_FRAMES * 2]; // stereo buffer
+  // FLAC 缓冲区大小：预留额外空间防止单声道扩充时越界
+  static constexpr uint32_t FLAC_BUFFER_FRAMES = 1024;
+  static int16_t pcm[FLAC_BUFFER_FRAMES * 2 + 64]; // stereo buffer + 安全边距
 
   // A) 先写完 pending
   if (s_pending_frames > 0) {
@@ -104,14 +112,14 @@ bool audio_flac_loop()
   }
 
   // B) 读新 PCM（按 channels 读）
-  const uint32_t ch = g_ch; // 确保 g_ch 来自 g_flac->channels
+  uint32_t frames_to_read = FLAC_BUFFER_FRAMES;
   uint32_t frames_read = 0;
 
-  if (ch == 2) {
-    frames_read = drflac_read_pcm_frames_s16(g_flac, PCM_FRAMES, pcm);
-  } else if (ch == 1) {
-    // 先读到 pcm 的前半（mono），再从后往前扩成 stereo
-    frames_read = drflac_read_pcm_frames_s16(g_flac, PCM_FRAMES, pcm);
+  if (g_ch == 2) {
+    frames_read = drflac_read_pcm_frames_s16(g_flac, frames_to_read, pcm);
+  } else { // g_ch == 1（已在 start 中验证过）
+    // 单声道扩充：先读到 pcm 的前半（mono），再从后往前扩成 stereo
+    frames_read = drflac_read_pcm_frames_s16(g_flac, frames_to_read, pcm);
     if (frames_read > 0) {
       for (int i = (int)frames_read - 1; i >= 0; --i) {
         int16_t v = pcm[i];
@@ -119,19 +127,14 @@ bool audio_flac_loop()
         pcm[i * 2 + 1] = v;
       }
     }
-  } else {
-    // 不支持的声道数：直接停
-    audio_flac_stop();
-    return false;
   }
 
   if (frames_read == 0) { audio_flac_stop(); return false; }
 
   // C) 设置采样率（不要重 init）
-  static int last_sr = 0;
-  if (g_sr != last_sr) {
+  if (g_sr != s_last_sr) {
     audio_i2s_set_sample_rate(g_sr);
-    last_sr = g_sr;
+    s_last_sr = g_sr;
   }
 
   // D) 建 pending 并尝试写

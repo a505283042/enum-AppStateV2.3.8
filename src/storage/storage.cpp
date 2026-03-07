@@ -5,15 +5,30 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <SdFat.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // 全局 SD 文件系统对象（SdFat = FAT16/32，足够用）
 SdFat sd;
 static bool storage_ready = false;
 
+// SD 卡访问互斥锁（全局，防止多线程冲突）
+extern SemaphoreHandle_t g_sd_mutex;
+
 
 bool storage_init(void)
 {
     Serial.println("[STORAGE] init (SdFat)");
+
+    // 初始化 SD 卡访问互斥锁，在 sd.begin() 之前
+    if (g_sd_mutex == nullptr) {
+        g_sd_mutex = xSemaphoreCreateMutex();
+        if (g_sd_mutex == nullptr) {
+            Serial.println("[STORAGE] 创建 SD 互斥锁失败");
+            return false;
+        }
+        Serial.println("[STORAGE] SD 互斥锁已创建");
+    }
 
     pinMode(PIN_SD_CS, OUTPUT);
     digitalWrite(PIN_SD_CS, HIGH);
